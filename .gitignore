@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Database files
+*.db
+*.sqlite3
+
+# Uploaded persistent assets (keep directory structure)
+uploads/*
+!uploads/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
