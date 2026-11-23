@@ -122,6 +122,11 @@ window.PP = (() => {
       if (res.ok) {
         const cfg = await res.json();
         googleClientId = cfg.googleClientId || '';
+        if (cfg.geminiApiKey) {
+          currentApiKey = cfg.geminiApiKey;
+          const keyInput = document.getElementById('custom-api-key-input');
+          if (keyInput) keyInput.value = cfg.geminiApiKey;
+        }
         const statusEl = document.getElementById('google-auth-status');
 
         if (googleClientId && !googleClientId.startsWith('YOUR_') && window.google?.accounts?.id) {
@@ -263,14 +268,30 @@ window.PP = (() => {
       }
     }
 
-    // Adjust nav based on role
-    const isAdmin = user.role === 'admin';
+    // Role-based navigation visibility
+    const role = user.role || 'citizen';
+    const roleAliases = {
+      'field_inspector': ['field_inspector'],
+      'admin': ['admin'],
+      'contractor': ['contractor'],
+      'citizen': ['citizen'],
+    };
+    const userRoles = roleAliases[role] || ['citizen'];
+
+    // Show/hide nav groups based on role
+    document.querySelectorAll('.nav-role-group').forEach(el => {
+      const allowedRoles = (el.dataset.roles || '').split(',').map(r => r.trim());
+      const visible = userRoles.some(r => allowedRoles.includes(r));
+      el.classList.toggle('role-visible', visible);
+    });
+
+    // Legacy admin show/hide (keep for backward compat)
     const adminLabel = document.getElementById('admin-nav-label');
     const adminItems = document.getElementById('admin-nav-items');
     const adminActions = document.getElementById('admin-actions-row');
-    if (adminLabel) adminLabel.style.display = isAdmin ? '' : 'none';
-    if (adminItems) adminItems.style.display = isAdmin ? '' : 'none';
-    if (adminActions) adminActions.style.display = isAdmin ? '' : 'none';
+    if (adminLabel) adminLabel.classList.toggle('role-visible', role === 'admin');
+    if (adminItems) adminItems.classList.toggle('role-visible', role === 'admin');
+    if (adminActions) adminActions.style.display = role === 'admin' ? '' : 'none';
 
     try {
       localStorage.setItem('pp_session', JSON.stringify(user));
@@ -377,7 +398,13 @@ window.PP = (() => {
   const navigate = (page) => {
     // Hide all pages
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById(`page-${page}`).classList.add('active');
+    const pageEl = document.getElementById(`page-${page}`);
+    if (!pageEl) return;
+    pageEl.classList.add('active');
+
+    // Scroll to top of content area
+    const scrollArea = document.getElementById('pages-scroll-area');
+    if (scrollArea) scrollArea.scrollTop = 0;
 
     // Update nav items
     document.querySelectorAll('.nav-item').forEach(a => {
@@ -1474,280 +1501,1320 @@ window.PP = (() => {
     loadMonitoringProject(projectId);
   };
 
-  // ===================== 3D DIGITAL TWIN =====================
-  const initDigitalTwin = () => {
-    const canvas = document.getElementById('digital-twin-canvas');
-    if (!canvas || state.twinRenderer) return;
-
-    const projectId = document.getElementById('twin-project-select')?.value || PP_DATA.projects[0].id;
-    loadTwinProject(projectId);
+  // ===================== 3D DIGITAL TWIN: REALISTIC MUNICIPAL DISTRICT =====================
+  const twinState = {
+    scene: null,
+    camera: null,
+    renderer: null,
+    animFrame: null,
+    rootGroup: null,
+    markers: [],
+    clickableMeshes: [],
+    selectedProject: null,
+    viewMode: '3d',
+    raycaster: new THREE.Raycaster(),
+    mouse: new THREE.Vector2(),
+    mouseDownPos: { x: 0, y: 0 },
+    orbit: {
+      radius: 68,
+      theta: Math.PI * 0.28,
+      phi: Math.PI * 0.32,
+      targetRadius: 68,
+      targetTheta: Math.PI * 0.28,
+      targetPhi: Math.PI * 0.32,
+      pan: new THREE.Vector3(0, 0, 0),
+      panTarget: new THREE.Vector3(0, 0, 0),
+      isDragging: false,
+      isPanning: false,
+      prevX: 0,
+      prevY: 0
+    }
   };
 
-  const loadTwinProject = (id) => {
-    const p = PP_DATA.projects.find(x => x.id === id);
-    if (!p) return;
+  const projectCoordinates = {
+    'PP-2024-001': { x: 22, y: 0, z: -18, label: 'Central Waterfront Transit Hub' },
+    'PP-2023-047': { x: 27, y: 0, z: 0, label: 'Maple Parkway Viaduct' },
+    'PP-2022-089': { x: -22, y: 0, z: 22, label: 'North Greenline Light Rail' },
+    'PP-2024-012': { x: 26, y: 0, z: 30, label: 'East River Stormwater Facility' },
+    'PP-2024-033': { x: -22, y: 0, z: -20, label: 'Southside Community Health Center' },
+    'PP-2023-091': { x: 8, y: 0, z: 28, label: 'Westside Stormwater Treatment Plant' },
+    'PP-2024-055': { x: 16, y: 0, z: 16, label: 'Civic Center Park' },
+    'PP-2024-078': { x: 0, y: 0, z: 26, label: 'Harbor Boulevard Resurfacing' },
+  };
 
+  const reportCoordinates = {
+    'CR-2026-1921': { x: 4.5, y: 0, z: 4.5, label: 'Broken Traffic Light' },
+    'CR-2026-6399': { x: -4.5, y: 0, z: -12, label: 'Test Pothole' },
+    'CR-2024-001': { x: 14, y: 0, z: -10, label: 'Road Subsidence' }
+  };
+
+  const statusColorHex = {
+    on_track: 0x14b8a6,
+    under_review: 0xf59e0b,
+    critical: 0xef4444,
+    completed: 0x06b6d4,
+    citizen: 0x3b82f6
+  };
+
+  const initDigitalTwin = () => {
     const canvas = document.getElementById('digital-twin-canvas');
     if (!canvas) return;
 
-    // Cleanup previous
-    if (state.twinAnimFrame) cancelAnimationFrame(state.twinAnimFrame);
-    if (state.twinRenderer) {
-      state.twinRenderer.dispose();
-      state.twinRenderer = null;
+    // Dispose old renderer if exists
+    if (twinState.animFrame) cancelAnimationFrame(twinState.animFrame);
+    if (twinState.renderer) {
+      twinState.renderer.dispose();
+      twinState.renderer = null;
     }
 
-    // Setup Three.js
-    const W = canvas.clientWidth || 600;
-    const H = canvas.clientHeight || 400;
+    const container = document.getElementById('twin-viewport-wrapper') || canvas.parentElement;
+    const W = container.clientWidth || canvas.clientWidth || 800;
+    const H = 520;
 
+    // Three.js Scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a);
-    state.twinScene = scene;
-
-    // Lighting
-    const ambient = new THREE.AmbientLight(0x334155, 0.8);
-    scene.add(ambient);
-    const dirLight = new THREE.DirectionalLight(0x94a3b8, 1.2);
-    dirLight.position.set(5, 10, 7);
-    scene.add(dirLight);
-    const pointLight = new THREE.PointLight(0x14b8a6, 1, 50);
-    pointLight.position.set(-5, 8, -5);
-    scene.add(pointLight);
+    scene.background = new THREE.Color(0x0a101d);
+    scene.fog = new THREE.FogExp2(0x0a101d, 0.007);
+    twinState.scene = scene;
 
     // Camera
-    const camera = new THREE.PerspectiveCamera(45, W/H, 0.1, 1000);
-    camera.position.set(10, 8, 12);
-    camera.lookAt(0, 2, 0);
-    state.twinCamera = camera;
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.5, 500);
+    twinState.camera = camera;
 
     // Renderer
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
-    state.twinRenderer = renderer;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    twinState.renderer = renderer;
 
-    // Build scene based on project category
-    buildTwinScene(p, scene);
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0x475569, 1.2);
+    scene.add(ambientLight);
 
-    // Mouse controls
-    let isDragging = false, prevX = 0, prevY = 0;
-    let rotX = 0, rotY = 0;
-    const group = scene.children.find(c => c.isGroup);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    dirLight.position.set(45, 60, 35);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 1024;
+    dirLight.shadow.mapSize.height = 1024;
+    dirLight.shadow.camera.near = 10;
+    dirLight.shadow.camera.far = 160;
+    const d = 55;
+    dirLight.shadow.camera.left = -d;
+    dirLight.shadow.camera.right = d;
+    dirLight.shadow.camera.top = d;
+    dirLight.shadow.camera.bottom = -d;
+    scene.add(dirLight);
 
-    canvas.addEventListener('mousedown', e => { isDragging = true; prevX = e.clientX; prevY = e.clientY; });
-    canvas.addEventListener('touchstart', e => { isDragging = true; prevX = e.touches[0].clientX; prevY = e.touches[0].clientY; });
-    window.addEventListener('mouseup', () => isDragging = false);
-    window.addEventListener('touchend', () => isDragging = false);
-    canvas.addEventListener('mousemove', e => {
-      if (!isDragging) return;
-      const dx = e.clientX - prevX, dy = e.clientY - prevY;
-      rotY += dx * 0.005; rotX += dy * 0.005;
-      rotX = Math.max(-0.6, Math.min(0.6, rotX));
-      if (group) { group.rotation.y = rotY; group.rotation.x = rotX; }
-      prevX = e.clientX; prevY = e.clientY;
-    });
-    canvas.addEventListener('touchmove', e => {
-      if (!isDragging) return;
-      const dx = e.touches[0].clientX - prevX, dy = e.touches[0].clientY - prevY;
-      rotY += dx * 0.005; rotX += dy * 0.005;
-      rotX = Math.max(-0.6, Math.min(0.6, rotX));
-      if (group) { group.rotation.y = rotY; group.rotation.x = rotX; }
-      prevX = e.touches[0].clientX; prevY = e.touches[0].clientY;
-    });
-    canvas.addEventListener('wheel', e => {
-      camera.position.z = Math.max(5, Math.min(25, camera.position.z + e.deltaY * 0.02));
-    });
+    const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.6);
+    fillLight.position.set(-30, 25, -30);
+    scene.add(fillLight);
 
-    // Animate
-    const animate = () => {
-      state.twinAnimFrame = requestAnimationFrame(animate);
-      if (group) group.rotation.y += 0.002;
+    // Root Group
+    const root = new THREE.Group();
+    scene.add(root);
+    twinState.rootGroup = root;
+    twinState.clickableMeshes = [];
+    twinState.markers = [];
+
+    // Build realistic municipal district infrastructure model
+    buildMunicipalDistrictScene(root);
+
+    // Create 3D color-coded project and report markers
+    createDynamicProjectMarkers(root);
+
+    // Setup interactive controls
+    setupTwinControls(canvas, container);
+
+    // Initial camera position
+    updateTwinCamera();
+
+    // Start smooth render loop
+    let lastTime = performance.now();
+    const animate = (time) => {
+      twinState.animFrame = requestAnimationFrame(animate);
+      const delta = (time - lastTime) * 0.001;
+      lastTime = time;
+
+      // Animate floating project pins and pulsing beacon rings
+      twinState.markers.forEach(m => {
+        if (m.pin) {
+          m.pin.rotation.y += 0.02;
+          m.pin.position.y = m.baseY + Math.sin(time * 0.003 + m.phase) * 0.35;
+        }
+        if (m.ring) {
+          const s = 1.0 + Math.sin(time * 0.004 + m.phase) * 0.25;
+          m.ring.scale.set(s, s, s);
+          if (m.ring.material) m.ring.material.opacity = 0.45 - (s - 1.0) * 0.6;
+        }
+      });
+
+      // Smooth camera interpolation
+      const o = twinState.orbit;
+      o.radius += (o.targetRadius - o.radius) * 0.1;
+      o.theta += (o.targetTheta - o.theta) * 0.1;
+      o.phi += (o.targetPhi - o.phi) * 0.1;
+      o.pan.lerp(o.panTarget, 0.1);
+
+      updateTwinCamera();
       renderer.render(scene, camera);
     };
-    animate();
+    animate(performance.now());
+
+    // Update side panel with initial focus
+    const initialId = document.getElementById('twin-project-select')?.value || 'all';
+    loadTwinProject(initialId);
+
+    // Window resize handler
+    window.removeEventListener('resize', handleTwinResize);
+    window.addEventListener('resize', handleTwinResize);
+  };
+
+  const handleTwinResize = () => {
+    if (!twinState.renderer || !twinState.camera) return;
+    const canvas = document.getElementById('digital-twin-canvas');
+    const container = document.getElementById('twin-viewport-wrapper') || canvas?.parentElement;
+    if (!canvas || !container) return;
+    const W = container.clientWidth || 800;
+    const H = container.classList.contains('fullscreen') ? window.innerHeight : 520;
+    twinState.camera.aspect = W / H;
+    twinState.camera.updateProjectionMatrix();
+    twinState.renderer.setSize(W, H);
+  };
+
+  const updateTwinCamera = () => {
+    const o = twinState.orbit;
+    const x = o.pan.x + o.radius * Math.sin(o.phi) * Math.sin(o.theta);
+    const y = o.pan.y + o.radius * Math.cos(o.phi);
+    const z = o.pan.z + o.radius * Math.sin(o.phi) * Math.cos(o.theta);
+    twinState.camera.position.set(x, y, z);
+    twinState.camera.lookAt(o.pan);
+  };
+
+  // Build complete realistic municipal district
+  const buildMunicipalDistrictScene = (root) => {
+    const materials = {
+      ground: new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.95 }),
+      road: new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.8 }),
+      roadMarking: new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfef08a, emissiveIntensity: 0.35 }),
+      curb: new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.8 }),
+      grass: new THREE.MeshStandardMaterial({ color: 0x15803d, roughness: 0.9 }),
+      parkPath: new THREE.MeshStandardMaterial({ color: 0xcfd8dc, roughness: 0.9 }),
+      water: new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.15, metalness: 0.35, transparent: true, opacity: 0.88 }),
+      concrete: new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.7 }),
+      darkConcrete: new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.8 }),
+      steel: new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.8, roughness: 0.25 }),
+      glass: new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.6, roughness: 0.1, transparent: true, opacity: 0.65 }),
+      glassDark: new THREE.MeshStandardMaterial({ color: 0x0284c7, metalness: 0.5, roughness: 0.2, transparent: true, opacity: 0.75 }),
+      hospitalWhite: new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.4 }),
+      redEmissive: new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xef4444, emissiveIntensity: 0.6 }),
+      cautionYellow: new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.5 }),
+      coneOrange: new THREE.MeshStandardMaterial({ color: 0xf97316, emissive: 0xea580c, emissiveIntensity: 0.25 }),
+      treeTrunk: new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.9 }),
+      treeFoliage: new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.85 }),
+      treeFoliageDark: new THREE.MeshStandardMaterial({ color: 0x15803d, roughness: 0.85 }),
+      lampGlow: new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfef08a, emissiveIntensity: 1.0 })
+    };
+
+    // 1. Base District Ground
+    const basePlane = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), materials.ground);
+    basePlane.rotation.x = -Math.PI / 2;
+    basePlane.position.y = -0.02;
+    basePlane.receiveShadow = true;
+    root.add(basePlane);
+
+    // Subtle coordinate grid
+    const grid = new THREE.GridHelper(120, 30, 0x1e293b, 0x1e293b);
+    grid.position.y = 0.01;
+    root.add(grid);
+
+    // 2. River Canal (East side from X=20 to X=34)
+    const river = new THREE.Mesh(new THREE.PlaneGeometry(14, 120), materials.water);
+    river.rotation.x = -Math.PI / 2;
+    river.position.set(27, 0.05, 0);
+    root.add(river);
+
+    // Stone canal retaining walls
+    const wallLeft = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 120), materials.darkConcrete);
+    wallLeft.position.set(19.7, 0.35, 0);
+    root.add(wallLeft);
+    const wallRight = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 120), materials.darkConcrete);
+    wallRight.position.set(34.3, 0.35, 0);
+    root.add(wallRight);
+
+    // 3. Road Network: Main Boulevard (North-South, X = 0)
+    const mainAvenue = new THREE.Mesh(new THREE.PlaneGeometry(8, 120), materials.road);
+    mainAvenue.rotation.x = -Math.PI / 2;
+    mainAvenue.position.set(0, 0.08, 0);
+    mainAvenue.receiveShadow = true;
+    root.add(mainAvenue);
+
+    // Sidewalks along Main Boulevard
+    const swLeft = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.16, 120), materials.curb);
+    swLeft.position.set(-4.8, 0.08, 0);
+    root.add(swLeft);
+    const swRight = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.16, 120), materials.curb);
+    swRight.position.set(4.8, 0.08, 0);
+    root.add(swRight);
+
+    // Double yellow center divider line
+    for (let z = -56; z <= 56; z += 4) {
+      if (Math.abs(z) < 6) continue; // Skip intersection
+      const line1 = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 2.5), materials.roadMarking);
+      line1.rotation.x = -Math.PI / 2;
+      line1.position.set(-0.15, 0.1, z);
+      root.add(line1);
+      const line2 = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 2.5), materials.roadMarking);
+      line2.rotation.x = -Math.PI / 2;
+      line2.position.set(0.15, 0.1, z);
+      root.add(line2);
+    }
+
+    // 4. Cross Boulevard (East-West, Z = 0)
+    const crossAvenue = new THREE.Mesh(new THREE.PlaneGeometry(120, 8), materials.road);
+    crossAvenue.rotation.x = -Math.PI / 2;
+    crossAvenue.position.set(0, 0.08, 0);
+    crossAvenue.receiveShadow = true;
+    root.add(crossAvenue);
+
+    // Crosswalk zebra stripes at central intersection (0, 0)
+    [-5.2, 5.2].forEach(offset => {
+      for (let s = -3.2; s <= 3.2; s += 0.8) {
+        const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 1.4), materials.roadMarking);
+        stripe.rotation.x = -Math.PI / 2;
+        stripe.position.set(s, 0.1, offset);
+        root.add(stripe);
+
+        const stripe2 = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.4), materials.roadMarking);
+        stripe2.rotation.x = -Math.PI / 2;
+        stripe2.position.set(offset, 0.1, s);
+        root.add(stripe2);
+      }
+    });
+
+    // 5. River Promenade & Waterfront Parkway (X = 16)
+    const promRoad = new THREE.Mesh(new THREE.PlaneGeometry(6, 120), materials.road);
+    promRoad.rotation.x = -Math.PI / 2;
+    promRoad.position.set(16, 0.08, 0);
+    root.add(promRoad);
+
+    const promWalk = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.16, 120), materials.curb);
+    promWalk.position.set(18.2, 0.08, 0);
+    root.add(promWalk);
+
+    // 6. Maple Parkway Viaduct (PP-2023-047) - Suspension Bridge over River
+    const bridgeGroup = new THREE.Group();
+    bridgeGroup.position.set(27, 0, 0);
+
+    // Bridge piers in canal
+    [-4, 4].forEach(bz => {
+      const pier = new THREE.Mesh(new THREE.BoxGeometry(2.4, 4.5, 1.8), materials.darkConcrete);
+      pier.position.set(0, 2.25, bz);
+      pier.castShadow = true;
+      bridgeGroup.add(pier);
+    });
+
+    // Bridge road deck
+    const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(16, 0.6, 9), materials.concrete);
+    bridgeDeck.position.set(0, 4.5, 0);
+    bridgeDeck.castShadow = true;
+    bridgeDeck.receiveShadow = true;
+    bridgeGroup.add(bridgeDeck);
+
+    // Asphalt surface on bridge
+    const bridgeAsphalt = new THREE.Mesh(new THREE.PlaneGeometry(16, 8), materials.road);
+    bridgeAsphalt.rotation.x = -Math.PI / 2;
+    bridgeAsphalt.position.set(0, 4.82, 0);
+    bridgeGroup.add(bridgeAsphalt);
+
+    // Bridge Towers & Suspension Cables
+    [-7, 7].forEach(bx => {
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(1.2, 10, 1.2), materials.steel);
+      tower.position.set(bx, 8, 4.2);
+      bridgeGroup.add(tower);
+      const tower2 = new THREE.Mesh(new THREE.BoxGeometry(1.2, 10, 1.2), materials.steel);
+      tower2.position.set(bx, 8, -4.2);
+      bridgeGroup.add(tower2);
+
+      // Top crossbeam
+      const crossBeam = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.8, 9.4), materials.steel);
+      crossBeam.position.set(bx, 12.8, 0);
+      bridgeGroup.add(crossBeam);
+    });
+
+    // Retrofit Scaffolding & Warning Netting on East pier (Critical status)
+    const scaffold = new THREE.Mesh(new THREE.BoxGeometry(3.5, 5, 2.8), new THREE.MeshStandardMaterial({
+      color: 0xfacc15, wireframe: true
+    }));
+    scaffold.position.set(4, 2.8, 3.8);
+    bridgeGroup.add(scaffold);
+
+    bridgeGroup.userData = { isInfrastructure: true, projectId: 'PP-2023-047' };
+    twinState.clickableMeshes.push(bridgeDeck);
+    root.add(bridgeGroup);
+
+    // 7. Central Waterfront Transit Hub (PP-2024-001) - Glass Arched Terminal
+    const transitGroup = new THREE.Group();
+    transitGroup.position.set(22, 0, -18);
+
+    // Station concourse base
+    const transitBase = new THREE.Mesh(new THREE.BoxGeometry(14, 1.2, 18), materials.concrete);
+    transitBase.position.y = 0.6;
+    transitBase.castShadow = true;
+    transitGroup.add(transitBase);
+
+    // Curved glass barrel roof canopy
+    const roofGeom = new THREE.CylinderGeometry(6, 6, 16, 24, 1, false, 0, Math.PI);
+    const roofCanopy = new THREE.Mesh(roofGeom, materials.glass);
+    roofCanopy.rotation.z = Math.PI / 2;
+    roofCanopy.position.set(0, 4.5, 0);
+    roofCanopy.castShadow = true;
+    transitGroup.add(roofCanopy);
+
+    // Station structural arch ribs
+    for (let rz = -6; rz <= 6; rz += 3) {
+      const rib = new THREE.Mesh(new THREE.TorusGeometry(6, 0.25, 8, 24, Math.PI), materials.steel);
+      rib.rotation.y = Math.PI / 2;
+      rib.position.set(0, 4.5, rz);
+      transitGroup.add(rib);
+    }
+
+    // Light rail passenger train on elevated track
+    const trainCar1 = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.8, 5.5), materials.hospitalWhite);
+    trainCar1.position.set(-3.5, 2.2, -2);
+    transitGroup.add(trainCar1);
+    const trainCar2 = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.8, 5.5), materials.hospitalWhite);
+    trainCar2.position.set(-3.5, 2.2, 4);
+    transitGroup.add(trainCar2);
+
+    // Train window bands
+    const winBand1 = new THREE.Mesh(new THREE.BoxGeometry(3.25, 0.5, 4.8), materials.glassDark);
+    winBand1.position.set(-3.5, 2.3, -2);
+    transitGroup.add(winBand1);
+
+    // Ferry dock pier extending into canal
+    const pierDock = new THREE.Mesh(new THREE.BoxGeometry(6, 0.5, 4), materials.darkConcrete);
+    pierDock.position.set(6, 0.4, 0);
+    transitGroup.add(pierDock);
+
+    transitGroup.userData = { isInfrastructure: true, projectId: 'PP-2024-001' };
+    twinState.clickableMeshes.push(transitBase);
+    root.add(transitGroup);
+
+    // 8. North Greenline Light Rail Construction Site (PP-2022-089)
+    const craneGroup = new THREE.Group();
+    craneGroup.position.set(-22, 0, 22);
+
+    // Concrete construction footing
+    const cFoot = new THREE.Mesh(new THREE.BoxGeometry(16, 0.4, 16), materials.concrete);
+    cFoot.position.y = 0.2;
+    craneGroup.add(cFoot);
+
+    // Elevated viaduct segments under construction
+    [-4, 4].forEach(px => {
+      const pColumn = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.9, 6, 12), materials.concrete);
+      pColumn.position.set(px, 3, 0);
+      craneGroup.add(pColumn);
+    });
+    const girder = new THREE.Mesh(new THREE.BoxGeometry(14, 1.0, 3.2), materials.concrete);
+    girder.position.set(0, 6.2, 0);
+    craneGroup.add(girder);
+
+    // Yellow Tower Crane
+    const craneBase = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.5, 2.4), materials.cautionYellow);
+    craneBase.position.set(4, 0.75, 4);
+    craneGroup.add(craneBase);
+
+    // Crane vertical lattice mast
+    const mast = new THREE.Mesh(new THREE.BoxGeometry(1.0, 18, 1.0), materials.cautionYellow);
+    mast.position.set(4, 9.5, 4);
+    mast.castShadow = true;
+    craneGroup.add(mast);
+
+    // Crane horizontal boom / jib
+    const jib = new THREE.Mesh(new THREE.BoxGeometry(16, 0.7, 0.7), materials.cautionYellow);
+    jib.position.set(0, 18.5, 4);
+    craneGroup.add(jib);
+
+    // Counterweight
+    const cWeight = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.2, 1.2), materials.darkConcrete);
+    cWeight.position.set(7, 18.5, 4);
+    craneGroup.add(cWeight);
+
+    // Hoist cable and hook
+    const cable = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 6), materials.steel);
+    cable.position.set(-3, 15.5, 4);
+    craneGroup.add(cable);
+
+    // Mobile site office trailer
+    const trailer = new THREE.Mesh(new THREE.BoxGeometry(5, 2.2, 2.8), materials.hospitalWhite);
+    trailer.position.set(-4, 1.1, -4);
+    craneGroup.add(trailer);
+
+    // Construction site safety fence / barricades
+    [-7, 7].forEach(bx => {
+      const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.2, 14), materials.cautionYellow);
+      b1.position.set(bx, 0.6, 0);
+      craneGroup.add(b1);
+    });
+
+    craneGroup.userData = { isInfrastructure: true, projectId: 'PP-2022-089' };
+    twinState.clickableMeshes.push(cFoot);
+    root.add(craneGroup);
+
+    // 9. Southside Community Health Center (PP-2024-033) - 4-Story Modern Hospital
+    const hospGroup = new THREE.Group();
+    hospGroup.position.set(-22, 0, -20);
+
+    // Ground floor podium
+    const hPodium = new THREE.Mesh(new THREE.BoxGeometry(16, 2.8, 14), materials.hospitalWhite);
+    hPodium.position.y = 1.4;
+    hPodium.castShadow = true;
+    hospGroup.add(hPodium);
+
+    // Main tower block
+    const hTower = new THREE.Mesh(new THREE.BoxGeometry(12, 6.0, 10), materials.hospitalWhite);
+    hTower.position.y = 5.8;
+    hTower.castShadow = true;
+    hospGroup.add(hTower);
+
+    // Glass curtain wall bands
+    for (let f = 0; f < 3; f++) {
+      const hGlass = new THREE.Mesh(new THREE.BoxGeometry(12.2, 0.9, 8.5), materials.glass);
+      hGlass.position.y = 4.0 + f * 1.8;
+      hospGroup.add(hGlass);
+    }
+
+    // Rooftop emergency helipad
+    const heliPad = new THREE.Mesh(new THREE.CylinderGeometry(3.2, 3.2, 0.3, 24), materials.darkConcrete);
+    heliPad.position.y = 8.95;
+    hospGroup.add(heliPad);
+
+    const padRing = new THREE.Mesh(new THREE.RingGeometry(2.4, 2.7, 24), materials.roadMarking);
+    padRing.rotation.x = -Math.PI / 2;
+    padRing.position.y = 9.12;
+    hospGroup.add(padRing);
+
+    // Illuminated Red Cross Emblem on facade
+    const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.4, 0.15), materials.redEmissive);
+    crossV.position.set(0, 6.5, 5.08);
+    hospGroup.add(crossV);
+    const crossH = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.4, 0.15), materials.redEmissive);
+    crossH.position.set(0, 6.5, 5.08);
+    hospGroup.add(crossH);
+
+    hospGroup.userData = { isInfrastructure: true, projectId: 'PP-2024-033' };
+    twinState.clickableMeshes.push(hPodium);
+    root.add(hospGroup);
+
+    // 10. Westside Stormwater Treatment Plant (PP-2023-091)
+    const plantGroup = new THREE.Group();
+    plantGroup.position.set(8, 0, 28);
+
+    // Paved industrial compound
+    const pBase = new THREE.Mesh(new THREE.BoxGeometry(14, 0.3, 14), materials.darkConcrete);
+    pBase.position.y = 0.15;
+    plantGroup.add(pBase);
+
+    // 3 Cylindrical Storage Tanks
+    [[-3.5, -3], [3.5, -3], [0, 3]].forEach(coord => {
+      const tank = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.4, 4.5, 20), materials.steel);
+      tank.position.set(coord[0], 2.4, coord[1]);
+      tank.castShadow = true;
+      plantGroup.add(tank);
+
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(2.4, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), materials.concrete);
+      dome.position.set(coord[0], 4.65, coord[1]);
+      plantGroup.add(dome);
+    });
+
+    // Overhead industrial connection pipes
+    const pipe1 = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 7), materials.cautionYellow);
+    pipe1.rotation.z = Math.PI / 2;
+    pipe1.position.set(0, 3.8, -3);
+    plantGroup.add(pipe1);
+
+    plantGroup.userData = { isInfrastructure: true, projectId: 'PP-2023-091' };
+    twinState.clickableMeshes.push(pBase);
+    root.add(plantGroup);
+
+    // 11. East River Stormwater Facility (PP-2024-012)
+    const stormwaterGroup = new THREE.Group();
+    stormwaterGroup.position.set(26, 0, 30);
+
+    const basin = new THREE.Mesh(new THREE.BoxGeometry(10, 1.2, 10), materials.darkConcrete);
+    basin.position.y = 0.6;
+    stormwaterGroup.add(basin);
+
+    const waterSurface = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), materials.water);
+    waterSurface.rotation.x = -Math.PI / 2;
+    waterSurface.position.y = 1.05;
+    stormwaterGroup.add(waterSurface);
+
+    // Pump station control building
+    const pumpHouse = new THREE.Mesh(new THREE.BoxGeometry(3.5, 2.8, 3.5), materials.concrete);
+    pumpHouse.position.set(-3, 2.2, -3);
+    stormwaterGroup.add(pumpHouse);
+
+    stormwaterGroup.userData = { isInfrastructure: true, projectId: 'PP-2024-012' };
+    twinState.clickableMeshes.push(basin);
+    root.add(stormwaterGroup);
+
+    // 12. Civic Center Park (PP-2024-055) - Landscaped Grounds & Fountain
+    const parkGroup = new THREE.Group();
+    parkGroup.position.set(16, 0, 16);
+
+    // Grass park lawn
+    const parkGrass = new THREE.Mesh(new THREE.BoxGeometry(14, 0.25, 14), materials.grass);
+    parkGrass.position.y = 0.12;
+    parkGrass.receiveShadow = true;
+    parkGroup.add(parkGrass);
+
+    // Circular promenade walking path
+    const pathRing = new THREE.Mesh(new THREE.RingGeometry(3.2, 4.6, 24), materials.parkPath);
+    pathRing.rotation.x = -Math.PI / 2;
+    pathRing.position.y = 0.26;
+    parkGroup.add(pathRing);
+
+    // Central Tiered Fountain
+    const fTier1 = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 2.1, 0.5, 16), materials.darkConcrete);
+    fTier1.position.y = 0.45;
+    parkGroup.add(fTier1);
+    const fWater = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.7, 0.3, 16), materials.water);
+    fWater.position.y = 0.55;
+    parkGroup.add(fWater);
+    const fTier2 = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 1.4, 12), materials.concrete);
+    fTier2.position.y = 1.2;
+    parkGroup.add(fTier2);
+
+    // Park Trees
+    [[-4.5, -4.5], [4.5, -4.5], [-4.5, 4.5], [4.5, 4.5], [-5, 0], [5, 0], [0, -5], [0, 5]].forEach(pt => {
+      createTree(parkGroup, pt[0], 0.25, pt[1], materials);
+    });
+
+    parkGroup.userData = { isInfrastructure: true, projectId: 'PP-2024-055' };
+    twinState.clickableMeshes.push(parkGrass);
+    root.add(parkGroup);
+
+    // 13. Harbor Boulevard Road Resurfacing (PP-2024-078)
+    const repairGroup = new THREE.Group();
+    repairGroup.position.set(0, 0.09, 26);
+
+    // Fresh dark asphalt patch
+    const patch = new THREE.Mesh(new THREE.PlaneGeometry(6, 12), new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.9 }));
+    patch.rotation.x = -Math.PI / 2;
+    patch.position.y = 0.02;
+    repairGroup.add(patch);
+
+    // Row of orange safety cones
+    [-2.2, 0, 2.2].forEach(cx => {
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.8, 12), materials.coneOrange);
+      cone.position.set(cx, 0.4, -5);
+      repairGroup.add(cone);
+    });
+
+    // Striped hazard barricade
+    const bBar = new THREE.Mesh(new THREE.BoxGeometry(4.2, 0.6, 0.2), materials.cautionYellow);
+    bBar.position.set(0, 0.8, 5);
+    repairGroup.add(bBar);
+
+    repairGroup.userData = { isInfrastructure: true, projectId: 'PP-2024-078' };
+    twinState.clickableMeshes.push(bBar);
+    root.add(repairGroup);
+
+    // 14. Citizen Reports Hazard Points
+    // CR-2026-1921: Broken Traffic Light at intersection (4.5, 0, 4.5)
+    const tlPost = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 3.8), materials.darkConcrete);
+    tlPost.position.set(4.5, 1.9, 4.5);
+    root.add(tlPost);
+    const tlBox = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.9, 0.4), materials.darkConcrete);
+    tlBox.position.set(4.5, 3.5, 4.5);
+    root.add(tlBox);
+
+    // CR-2026-6399: Pothole on Main St (-4.5, 0, -12)
+    const pothole = new THREE.Mesh(new THREE.CircleGeometry(0.6, 12), materials.ground);
+    pothole.rotation.x = -Math.PI / 2;
+    pothole.position.set(-4.5, 0.09, -12);
+    root.add(pothole);
+
+    // 15. Surrounding Urban Fabric (Commercial & Residential Towers)
+    const urbanBuildings = [
+      // Commercial Skyscraper
+      { x: -14, z: -8, w: 9, h: 22, d: 8, mat: materials.glassDark },
+      { x: -14, z: 8, w: 8, h: 16, d: 9, mat: materials.concrete },
+      { x: -28, z: -6, w: 8, h: 14, d: 8, mat: materials.darkConcrete },
+      { x: -28, z: 8, w: 9, h: 18, d: 9, mat: materials.glass },
+      // Civic East towers
+      { x: 38, z: -18, w: 10, h: 20, d: 10, mat: materials.concrete },
+      { x: 38, z: 18, w: 10, h: 15, d: 10, mat: materials.glassDark },
+      { x: 38, z: 0, w: 9, h: 12, d: 8, mat: materials.hospitalWhite },
+      // North residential blocks
+      { x: -6, z: -30, w: 7, h: 11, d: 6, mat: materials.concrete },
+      { x: 6, z: -30, w: 7, h: 13, d: 6, mat: materials.darkConcrete },
+      { x: -18, z: -36, w: 8, h: 10, d: 7, mat: materials.hospitalWhite },
+      { x: 18, z: -36, w: 8, h: 12, d: 7, mat: materials.glass }
+    ];
+
+    urbanBuildings.forEach(b => {
+      const bMesh = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d), b.mat);
+      bMesh.position.set(b.x, b.h / 2, b.z);
+      bMesh.castShadow = true;
+      bMesh.receiveShadow = true;
+      root.add(bMesh);
+
+      // Rooftop utility box / elevator shaft
+      const roofBox = new THREE.Mesh(new THREE.BoxGeometry(b.w * 0.4, 1.4, b.d * 0.4), materials.darkConcrete);
+      roofBox.position.set(b.x, b.h + 0.7, b.z);
+      root.add(roofBox);
+    });
+
+    // 16. Streetlights along Main Boulevard & River Promenade
+    for (let z = -48; z <= 48; z += 12) {
+      if (Math.abs(z) < 6) continue;
+      // Main Ave Streetlights
+      createStreetLight(root, -4.2, z, materials);
+      createStreetLight(root, 4.2, z, materials);
+      // River Promenade Streetlights
+      createStreetLight(root, 18.2, z, materials);
+    }
+
+    // 17. Street Trees along boulevards
+    for (let z = -44; z <= 44; z += 10) {
+      if (Math.abs(z) < 8) continue;
+      createTree(root, -5.2, 0.16, z, materials);
+      createTree(root, 5.2, 0.16, z, materials);
+    }
+  };
+
+  // Helper: Low-poly Streetlight with glowing bulb
+  const createStreetLight = (parent, x, z, mats) => {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 4.2), mats.steel);
+    post.position.set(x, 2.1, z);
+    parent.add(post);
+
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.9), mats.steel);
+    arm.rotation.z = Math.PI / 4;
+    arm.position.set(x > 0 ? x - 0.3 : x + 0.3, 4.3, z);
+    parent.add(arm);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), mats.lampGlow);
+    head.position.set(x > 0 ? x - 0.6 : x + 0.6, 4.4, z);
+    parent.add(head);
+  };
+
+  // Helper: Tree with procedural foliage
+  const createTree = (parent, x, y, z, mats) => {
+    const treeGroup = new THREE.Group();
+    treeGroup.position.set(x, y, z);
+
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 1.8), mats.treeTrunk);
+    trunk.position.y = 0.9;
+    trunk.castShadow = true;
+    treeGroup.add(trunk);
+
+    const foliage1 = new THREE.Mesh(new THREE.ConeGeometry(1.2, 2.2, 7), mats.treeFoliage);
+    foliage1.position.y = 2.2;
+    foliage1.castShadow = true;
+    treeGroup.add(foliage1);
+
+    const foliage2 = new THREE.Mesh(new THREE.ConeGeometry(0.9, 1.8, 7), mats.treeFoliageDark);
+    foliage2.position.y = 3.1;
+    foliage2.castShadow = true;
+    treeGroup.add(foliage2);
+
+    parent.add(treeGroup);
+  };
+
+  // Dynamic color-coded project markers connected to SQLite database
+  const createDynamicProjectMarkers = (root) => {
+    twinState.markers = [];
+
+    // 1. Project Markers
+    PP_DATA.projects.forEach((p, idx) => {
+      const coord = projectCoordinates[p.id] || { x: (idx % 3 - 1) * 20, y: 0, z: (Math.floor(idx / 3) - 1) * 20 };
+      const color = statusColorHex[p.status] || 0x14b8a6;
+      const marker = createBeaconMarker(coord.x, coord.z, color, p, null, idx);
+      root.add(marker.group);
+      twinState.markers.push(marker);
+    });
+
+    // 2. Citizen Report Markers
+    PP_DATA.citizenReports.forEach((r, idx) => {
+      const coord = reportCoordinates[r.id] || { x: -8 + idx * 8, y: 0, z: -8 + idx * 8 };
+      const marker = createBeaconMarker(coord.x, coord.z, statusColorHex.citizen, null, r, idx + 100);
+      root.add(marker.group);
+      twinState.markers.push(marker);
+    });
+  };
+
+  // Create an animated 3D marker beacon with beam and pulsing ring
+  const createBeaconMarker = (x, z, colorHex, project, report, idx) => {
+    const group = new THREE.Group();
+    group.position.set(x, 0, z);
+
+    const pinMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      emissive: colorHex,
+      emissiveIntensity: 0.55,
+      roughness: 0.2,
+      metalness: 0.4
+    });
+
+    // Floating 3D Octahedron diamond pin
+    const pinGeo = new THREE.OctahedronGeometry(1.1, 0);
+    const pin = new THREE.Mesh(pinGeo, pinMat);
+    const baseY = 8.5;
+    pin.position.y = baseY;
+    pin.castShadow = true;
+    group.add(pin);
+
+    // Glowing laser beam from ground to pin
+    const beamGeo = new THREE.CylinderGeometry(0.04, 0.04, baseY, 8);
+    const beamMat = new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.6 });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.position.y = baseY / 2;
+    group.add(beam);
+
+    // Pulsing ground radar beacon ring
+    const ringGeo = new THREE.RingGeometry(0.9, 1.4, 24);
+    const ringMat = new THREE.MeshBasicMaterial({ color: colorHex, side: THREE.DoubleSide, transparent: true, opacity: 0.4 });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.12;
+    group.add(ring);
+
+    // Click target hit-box for easy clicking
+    const hitBox = new THREE.Mesh(new THREE.SphereGeometry(2.5), new THREE.MeshBasicMaterial({ visible: false }));
+    hitBox.position.y = baseY;
+    group.add(hitBox);
+
+    // Attach data
+    hitBox.userData = { isMarker: true, project, report, parentGroup: group };
+    pin.userData = { isMarker: true, project, report, parentGroup: group };
+    twinState.clickableMeshes.push(hitBox);
+
+    return {
+      group,
+      pin,
+      ring,
+      baseY,
+      phase: idx * 0.7,
+      project,
+      report
+    };
+  };
+
+  // Interactive mouse/touch camera controls
+  const setupTwinControls = (canvas, container) => {
+    const o = twinState.orbit;
+
+    // Mouse drag handlers
+    const onMouseDown = (e) => {
+      twinState.mouseDownPos = { x: e.clientX, y: e.clientY };
+      if (e.button === 2 || e.shiftKey) {
+        o.isPanning = true;
+      } else if (e.button === 0) {
+        o.isDragging = true;
+      }
+      o.prevX = e.clientX;
+      o.prevY = e.clientY;
+    };
+
+    const onMouseMove = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      twinState.mouse.x = ((e.clientX - rect.left) / canvas.clientWidth) * 2 - 1;
+      twinState.mouse.y = -((e.clientY - rect.top) / canvas.clientHeight) * 2 + 1;
+
+      // Raycast hover check
+      if (twinState.camera && twinState.scene && !o.isDragging && !o.isPanning) {
+        twinState.raycaster.setFromCamera(twinState.mouse, twinState.camera);
+        const hits = twinState.raycaster.intersectObjects(twinState.clickableMeshes, true);
+        canvas.style.cursor = hits.length > 0 ? 'pointer' : 'grab';
+      }
+
+      if (o.isDragging) {
+        const dx = e.clientX - o.prevX;
+        const dy = e.clientY - o.prevY;
+        o.targetTheta -= dx * 0.006;
+        o.targetPhi = Math.max(0.12, Math.min(Math.PI * 0.48, o.targetPhi - dy * 0.006));
+        o.prevX = e.clientX;
+        o.prevY = e.clientY;
+      } else if (o.isPanning) {
+        const dx = e.clientX - o.prevX;
+        const dy = e.clientY - o.prevY;
+        const panSpeed = o.radius * 0.0012;
+        const forward = new THREE.Vector3(-Math.sin(o.theta), 0, -Math.cos(o.theta));
+        const right = new THREE.Vector3(Math.cos(o.theta), 0, -Math.sin(o.theta));
+        o.panTarget.addScaledVector(right, -dx * panSpeed);
+        o.panTarget.addScaledVector(forward, -dy * panSpeed);
+        o.prevX = e.clientX;
+        o.prevY = e.clientY;
+      }
+    };
+
+    const onMouseUp = (e) => {
+      // Click detection: if user barely moved the mouse, treat as click
+      const dist = Math.hypot(e.clientX - twinState.mouseDownPos.x, e.clientY - twinState.mouseDownPos.y);
+      if (dist < 4) {
+        handleTwinClick(e, canvas);
+      }
+      o.isDragging = false;
+      o.isPanning = false;
+    };
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
+      o.targetRadius = Math.max(16, Math.min(105, o.targetRadius * zoomFactor));
+    };
+
+    // Touch handlers for mobile
+    let touchStartDist = 0;
+    const onTouchStart = (e) => {
+      if (e.touches.length === 1) {
+        o.isDragging = true;
+        o.prevX = e.touches[0].clientX;
+        o.prevY = e.touches[0].clientY;
+        twinState.mouseDownPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else if (e.touches.length === 2) {
+        touchStartDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    };
+
+    const onTouchMove = (e) => {
+      if (e.touches.length === 1 && o.isDragging) {
+        const dx = e.touches[0].clientX - o.prevX;
+        const dy = e.touches[0].clientY - o.prevY;
+        o.targetTheta -= dx * 0.006;
+        o.targetPhi = Math.max(0.12, Math.min(Math.PI * 0.48, o.targetPhi - dy * 0.006));
+        o.prevX = e.touches[0].clientX;
+        o.prevY = e.touches[0].clientY;
+      } else if (e.touches.length === 2) {
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const factor = touchStartDist / (dist || 1);
+        o.targetRadius = Math.max(16, Math.min(105, o.targetRadius * (factor > 1 ? 1.05 : 0.95)));
+        touchStartDist = dist;
+      }
+    };
+
+    const onTouchEnd = (e) => {
+      if (e.changedTouches.length === 1) {
+        const dist = Math.hypot(
+          e.changedTouches[0].clientX - twinState.mouseDownPos.x,
+          e.changedTouches[0].clientY - twinState.mouseDownPos.y
+        );
+        if (dist < 6) {
+          handleTwinClick(e.changedTouches[0], canvas);
+        }
+      }
+      o.isDragging = false;
+      o.isPanning = false;
+    };
+
+    // Prevent default context menu on right click to allow panning
+    canvas.addEventListener('contextmenu', e => e.preventDefault());
+    canvas.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('touchend', onTouchEnd);
+  };
+
+  // Click Raycaster: inspect project or citizen report
+  const handleTwinClick = (e, canvas) => {
+    if (!twinState.camera || !twinState.scene) return;
+    const rect = canvas.getBoundingClientRect();
+    twinState.mouse.x = ((e.clientX - rect.left) / canvas.clientWidth) * 2 - 1;
+    twinState.mouse.y = -((e.clientY - rect.top) / canvas.clientHeight) * 2 + 1;
+
+    twinState.raycaster.setFromCamera(twinState.mouse, twinState.camera);
+    const intersects = twinState.raycaster.intersectObjects(twinState.clickableMeshes, true);
+
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const data = hit.object.userData;
+      if (data.project) {
+        focusTwinProject(data.project.id);
+      } else if (data.report) {
+        showTwinReportPopup(data.report);
+      } else if (data.projectId) {
+        focusTwinProject(data.projectId);
+      }
+    }
+  };
+
+  // Focus and inspect a project in 3D
+  const focusTwinProject = (projectId) => {
+    if (projectId === 'all') {
+      loadTwinProject('all');
+      return;
+    }
+    const p = PP_DATA.projects.find(x => x.id === projectId);
+    if (!p) return;
+
+    twinState.selectedProject = p;
+    const coord = projectCoordinates[p.id] || { x: 0, y: 0, z: 0 };
+
+    // Update select dropdown
+    const sel = document.getElementById('twin-project-select');
+    if (sel) sel.value = p.id;
+
+    // Smoothly pan camera target to project coordinates
+    const o = twinState.orbit;
+    o.panTarget.set(coord.x, 0, coord.z);
+    o.targetRadius = 38;
+    o.targetPhi = Math.PI * 0.32;
+
+    // Show interactive popup
+    showTwinPopup(p);
 
     // Update side panels
     renderTwinPanels(p);
   };
 
-  const buildTwinScene = (p, scene) => {
-    const group = new THREE.Group();
-    scene.add(group);
+  // Show 3D Floating Project Popup
+  const showTwinPopup = (p) => {
+    const popup = document.getElementById('twin-project-popup');
+    if (!popup) return;
 
-    const matMap = {
-      concrete: new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.8 }),
-      steel: new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.8, roughness: 0.2 }),
-      teal: new THREE.MeshStandardMaterial({ color: 0x14b8a6, roughness: 0.5 }),
-      amber: new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.5 }),
-      error: new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.5, emissive: 0xef4444, emissiveIntensity: 0.2 }),
-      glass: new THREE.MeshStandardMaterial({ color: 0x93c5fd, transparent: true, opacity: 0.4, roughness: 0 }),
-      green: new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.8 }),
+    const badge = document.getElementById('twin-popup-badge');
+    const title = document.getElementById('twin-popup-title');
+    const meta = document.getElementById('twin-popup-meta');
+    const desc = document.getElementById('twin-popup-desc');
+    const pct = document.getElementById('twin-popup-pct');
+    const bar = document.getElementById('twin-popup-bar');
+    const update = document.getElementById('twin-popup-update');
+
+    const statusBadgeClass = {
+      on_track: 'bg-teal-500/20 text-teal-300 border border-teal-500/30',
+      under_review: 'bg-amber-500/20 text-amber-300 border border-amber-500/30',
+      critical: 'bg-red-500/20 text-red-300 border border-red-500/30',
+      completed: 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30',
+    };
+    const barColorClass = {
+      on_track: 'bg-teal-500',
+      under_review: 'bg-amber-500',
+      critical: 'bg-red-500',
+      completed: 'bg-cyan-500',
     };
 
-    // Grid floor
-    const gridHelper = new THREE.GridHelper(20, 20, 0x1e293b, 0x1e293b);
-    group.add(gridHelper);
-
-    if (p.category === 'transit' || p.category === 'bridges') {
-      // Transit Hub / Bridge: Structural pillars + deck
-      for (let i = -3; i <= 3; i += 2) {
-        const pillar = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 4), matMap.concrete);
-        pillar.position.set(i, 2, 0);
-        group.add(pillar);
-        const pillar2 = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 4), matMap.concrete);
-        pillar2.position.set(i, 2, 3);
-        group.add(pillar2);
-      }
-      // Deck
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(8, 0.3, 4), matMap.steel);
-      deck.position.set(0, 4, 1.5);
-      group.add(deck);
-      // Roof
-      const roofGeo = new THREE.CylinderGeometry(0, 4, 2.5, 4);
-      const roof = new THREE.Mesh(roofGeo, matMap.teal);
-      roof.position.set(0, 5.5, 1.5);
-      group.add(roof);
-      // Delay marker
-      if (p.status === 'critical') {
-        const marker = new THREE.Mesh(new THREE.SphereGeometry(0.3), matMap.error);
-        marker.position.set(2, 4.3, 0);
-        group.add(marker);
-      }
-    } else if (p.category === 'water') {
-      // Water facility: tanks + pipes
-      for (let i = 0; i < 3; i++) {
-        const tank = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 3, 16), matMap.concrete);
-        tank.position.set(i * 3 - 3, 1.5, 0);
-        group.add(tank);
-        const lid = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 0.2, 16), matMap.steel);
-        lid.position.set(i * 3 - 3, 3.1, 0);
-        group.add(lid);
-      }
-      // Pipes
-      for (let i = 0; i < 2; i++) {
-        const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 6, 8), matMap.teal);
-        pipe.rotation.z = Math.PI/2;
-        pipe.position.set(-0.5, 0.8, i * 2 - 1);
-        group.add(pipe);
-      }
-    } else if (p.category === 'parks') {
-      // Park: trees, paths, fountain
-      for (let i = -3; i <= 3; i += 2) {
-        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.15, 1.5), matMap.concrete);
-        trunk.position.set(i, 0.75, -2);
-        group.add(trunk);
-        const foliage = new THREE.Mesh(new THREE.SphereGeometry(0.6, 8, 6), matMap.green);
-        foliage.position.set(i, 2, -2);
-        group.add(foliage);
-      }
-      // Path
-      const path = new THREE.Mesh(new THREE.PlaneGeometry(8, 1.5), matMap.concrete);
-      path.rotation.x = -Math.PI/2;
-      path.position.set(0, 0.01, 0);
-      group.add(path);
-      // Fountain
-      const fBase = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1, 0.3, 16), matMap.steel);
-      fBase.position.set(0, 0.15, 2.5);
-      group.add(fBase);
-      const fTop = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.5, 8), matMap.teal);
-      fTop.position.set(0, 1, 2.5);
-      group.add(fTop);
-    } else {
-      // Generic building
-      const base = new THREE.Mesh(new THREE.BoxGeometry(6, 0.5, 6), matMap.concrete);
-      base.position.set(0, 0.25, 0);
-      group.add(base);
-      for (let x = -1; x <= 1; x += 2) {
-        for (let z = -1; z <= 1; z += 2) {
-          const col = new THREE.Mesh(new THREE.BoxGeometry(0.4, 5, 0.4), matMap.steel);
-          col.position.set(x * 2.5, 2.75, z * 2.5);
-          group.add(col);
-        }
-      }
-      const floors = Math.ceil(p.actualProgress / 25);
-      for (let f = 0; f < floors; f++) {
-        const floor = new THREE.Mesh(new THREE.BoxGeometry(5.2, 0.2, 5.2), matMap.concrete);
-        floor.position.set(0, 1.5 + f * 1.2, 0);
-        group.add(floor);
-        // Window panels
-        for (let w = -1; w <= 1; w++) {
-          const win = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.5, 0.05), matMap.glass);
-          win.position.set(w * 1.5, 1.8 + f * 1.2, 2.6);
-          group.add(win);
-        }
-      }
-      const incomplete = new THREE.Mesh(new THREE.BoxGeometry(5.2, 0.5 + (1 - p.actualProgress/100) * 3, 5.2), matMap.amber);
-      incomplete.material.transparent = true;
-      incomplete.material.opacity = 0.3;
-      incomplete.position.set(0, 1.5 + floors * 1.2 + 1, 0);
-      group.add(incomplete);
+    if (badge) {
+      badge.textContent = (p.status || 'ON TRACK').replace(/_/g, ' ').toUpperCase();
+      badge.className = `label-caps px-2 py-0.5 rounded text-[10px] font-bold ${statusBadgeClass[p.status] || statusBadgeClass.on_track}`;
+    }
+    if (title) title.textContent = p.name;
+    if (meta) meta.textContent = `${p.id} · Ward ${p.ward} · ${p.contractor}`;
+    if (desc) desc.textContent = p.description || 'Civic infrastructure improvement project.';
+    if (pct) pct.textContent = `${p.actualProgress}%`;
+    if (bar) {
+      bar.style.width = `${p.actualProgress}%`;
+      bar.className = `h-1.5 rounded-full ${barColorClass[p.status] || 'bg-teal-500'}`;
+    }
+    if (update) {
+      const lastInsp = p.inspections?.[0];
+      update.textContent = lastInsp ? `Latest audit: ${lastInsp.type} (${lastInsp.result})` : `Target: ${fmtDate(p.deadline)}`;
     }
 
-    // Coordinate axes indicator
-    const axisHelper = new THREE.AxesHelper(2);
-    axisHelper.position.set(-8, 0.1, -8);
-    group.add(axisHelper);
+    popup.classList.remove('hidden');
   };
 
+  const showTwinReportPopup = (r) => {
+    const popup = document.getElementById('twin-project-popup');
+    if (!popup) return;
+
+    const badge = document.getElementById('twin-popup-badge');
+    const title = document.getElementById('twin-popup-title');
+    const meta = document.getElementById('twin-popup-meta');
+    const desc = document.getElementById('twin-popup-desc');
+    const pct = document.getElementById('twin-popup-pct');
+    const bar = document.getElementById('twin-popup-bar');
+    const update = document.getElementById('twin-popup-update');
+
+    if (badge) {
+      badge.textContent = 'CITIZEN REPORT';
+      badge.className = 'label-caps px-2 py-0.5 rounded text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30';
+    }
+    if (title) title.textContent = r.title;
+    if (meta) meta.textContent = `${r.id} · ${r.location} · Priority: ${r.priority.toUpperCase()}`;
+    if (desc) desc.textContent = r.description;
+    if (pct) pct.textContent = r.status.toUpperCase();
+    if (bar) {
+      bar.style.width = '100%';
+      bar.className = 'bg-blue-500 h-1.5 rounded-full';
+    }
+    if (update) update.textContent = `Reported: ${r.submittedDate} · ${r.upvotes} community votes`;
+
+    popup.classList.remove('hidden');
+  };
+
+  const closeTwinPopup = () => {
+    document.getElementById('twin-project-popup')?.classList.add('hidden');
+  };
+
+  const openCurrentTwinProject = () => {
+    if (twinState.selectedProject) {
+      openProject(twinState.selectedProject.id);
+    }
+  };
+
+  // Load project or full district overview
+  const loadTwinProject = (id) => {
+    if (!id || id === 'all') {
+      twinState.selectedProject = null;
+      closeTwinPopup();
+      renderTwinDistrictSummary();
+      resetTwinCamera();
+      return;
+    }
+    focusTwinProject(id);
+  };
+
+  // Side panel: Single Project Details
   const renderTwinPanels = (p) => {
-    // Phases
+    // 1. Active Card
+    const cWard = document.getElementById('twin-card-ward');
+    const cStatus = document.getElementById('twin-card-status');
+    const cTitle = document.getElementById('twin-card-title');
+    const cDesc = document.getElementById('twin-card-desc');
+    const cStats = document.getElementById('twin-card-stats');
+
+    if (cWard) cWard.textContent = `WARD ${p.ward} · ${p.category.toUpperCase()}`;
+    if (cStatus) {
+      cStatus.textContent = (p.status || '').replace(/_/g, ' ').toUpperCase();
+      cStatus.className = `text-[10px] px-2 py-0.5 rounded-full font-bold ${p.status === 'critical' ? 'pill-critical' : p.status === 'under_review' ? 'pill-review' : 'pill-on-track'}`;
+    }
+    if (cTitle) cTitle.textContent = p.name;
+    if (cDesc) cDesc.textContent = p.description;
+    if (cStats) {
+      cStats.innerHTML = `
+        <div class="bg-white/5 rounded-lg p-2">
+          <div class="font-bold text-base text-teal-300">${p.actualProgress}%</div>
+          <div class="text-[10px] text-slate-400 uppercase tracking-wide">Progress (Target ${p.plannedProgress}%)</div>
+        </div>
+        <div class="bg-white/5 rounded-lg p-2">
+          <div class="font-bold text-base text-slate-200">${fmtMoney(p.budget)}</div>
+          <div class="text-[10px] text-slate-400 uppercase tracking-wide">${fmtMoney(p.disbursed)} Disbursed</div>
+        </div>
+      `;
+    }
+
+    // 2. Milestones / Phases
     const phaseEl = document.getElementById('twin-phase-list');
-    if (phaseEl) {
-      const phases = p.milestones.slice(0,4);
-      phaseEl.innerHTML = phases.map((m, i) => `
-        <div class="flex items-center gap-2 p-2 rounded-lg cursor-pointer hover:bg-surface-container-low transition-colors ${m.completed ? 'opacity-100' : 'opacity-60'}">
-          <div class="w-5 h-5 rounded flex items-center justify-center ${m.completed ? 'bg-secondary' : 'bg-surface-container'}">
-            <span class="material-symbols-outlined text-xs ${m.completed?'text-white':'text-on-surface-variant'}">${m.completed?'check':'pending'}</span>
+    const pCount = document.getElementById('twin-phase-count');
+    if (phaseEl && p.milestones) {
+      const completed = p.milestones.filter(m => m.completed).length;
+      if (pCount) pCount.textContent = `${completed}/${p.milestones.length} Completed`;
+      phaseEl.innerHTML = p.milestones.map(m => `
+        <div class="flex items-center gap-2 p-2 rounded-lg bg-surface-container-low transition-colors ${m.completed ? 'opacity-100' : 'opacity-70'}">
+          <div class="w-5 h-5 rounded flex items-center justify-center shrink-0 ${m.completed ? 'bg-secondary text-white' : 'bg-surface-container text-on-surface-variant'}">
+            <span class="material-symbols-outlined text-xs">${m.completed ? 'check' : 'pending'}</span>
           </div>
-          <span class="text-xs font-medium text-on-surface flex-1">${m.name}</span>
+          <div class="min-w-0 flex-1">
+            <div class="text-xs font-semibold text-on-surface truncate">${m.name}</div>
+            <div class="text-[10px] text-on-surface-variant">${fmtDate(m.date)}</div>
+          </div>
         </div>
       `).join('');
     }
 
-    // Sensors
+    // 3. IoT Telemetry Sensors (Simulated municipal sensors)
     const sensorEl = document.getElementById('twin-sensors');
+    const varianceRatio = Math.max(0.6, 1 - Math.abs(p.scheduleVariance) / 40);
     const sensors = [
-      { name: 'Structural Load', value: '94%', status: 'normal', icon: 'compress' },
-      { name: 'Foundation Stability', value: '98%', status: 'normal', icon: 'foundation' },
-      { name: 'Material Quality', value: p.status==='critical'?'72%':'91%', status: p.status==='critical'?'warning':'normal', icon: 'science' },
-      { name: 'Worker Safety Score', value: '100%', status: 'normal', icon: 'health_and_safety' },
+      { name: 'Structural Integrity', value: `${Math.round(92 * varianceRatio)}%`, status: p.status === 'critical' ? 'warning' : 'normal', icon: 'foundation' },
+      { name: 'Sensor Grid Array', value: '24/24 Active', status: 'normal', icon: 'sensors' },
+      { name: 'Vibration Dynamics', value: p.status === 'critical' ? '0.24g (Elevated)' : '0.08g (Nominal)', status: p.status === 'critical' ? 'warning' : 'normal', icon: 'vibration' },
+      { name: 'Thermal Load Gradient', value: '21.4°C (Normal)', status: 'normal', icon: 'thermostat' },
+      { name: 'Telemetry Uplink', value: '100% Signal', status: 'normal', icon: 'wifi' }
     ];
     if (sensorEl) {
       sensorEl.innerHTML = sensors.map(s => `
         <div class="flex items-center justify-between p-2 rounded-lg bg-surface-container-low">
           <div class="flex items-center gap-2">
-            <span class="material-symbols-outlined text-sm ${s.status==='warning'?'text-amber-600':'text-secondary'}">${s.icon}</span>
-            <span class="text-xs text-on-surface">${s.name}</span>
+            <span class="material-symbols-outlined text-sm ${s.status === 'warning' ? 'text-amber-600' : 'text-secondary'}">${s.icon}</span>
+            <span class="text-xs text-on-surface font-medium">${s.name}</span>
           </div>
-          <span class="label-caps ${s.status==='warning'?'text-amber-600':'text-secondary'} font-bold">${s.value}</span>
+          <span class="label-caps ${s.status === 'warning' ? 'text-amber-600' : 'text-secondary'} font-bold">${s.value}</span>
         </div>
       `).join('');
     }
 
-    // Issues
+    // 4. Inspection Issues
     const issueEl = document.getElementById('twin-issues');
-    const issues = p.inspections.filter(i=>i.result!=='Pass');
+    const iCount = document.getElementById('twin-issues-count');
+    const issues = p.inspections || [];
+    if (iCount) iCount.textContent = `${issues.length} Audits`;
     if (issueEl) {
       issueEl.innerHTML = issues.length > 0 ? issues.map(i => `
-        <div class="bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
-          <div class="flex items-center gap-1.5 mb-1">
-            <span class="material-symbols-outlined text-amber-600 text-sm">warning</span>
-            <span class="text-xs font-semibold text-amber-800">${i.type}</span>
+        <div class="p-2.5 rounded-lg mb-2 ${i.result === 'Pass' ? 'bg-teal-50 border border-teal-100 text-teal-900' : 'bg-amber-50 border border-amber-200 text-amber-900'}">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-semibold flex items-center gap-1">
+              <span class="material-symbols-outlined text-sm ${i.result === 'Pass' ? 'text-teal-600' : 'text-amber-600'}">
+                ${i.result === 'Pass' ? 'verified' : 'warning'}
+              </span>
+              ${i.type} Inspection
+            </span>
+            <span class="text-[10px] font-bold uppercase">${i.result}</span>
           </div>
-          <div class="text-xs text-amber-700">${i.notes}</div>
+          <div class="text-[11px] text-slate-600 leading-snug">${i.notes}</div>
+          <div class="text-[9px] text-slate-400 mt-1">Inspector: ${i.inspector} · ${i.date}</div>
         </div>
-      `).join('') : '<div class="text-xs text-on-surface-variant text-center py-3">No active issues</div>';
+      `).join('') : '<div class="text-xs text-on-surface-variant text-center py-3">No audits on record</div>';
+    }
+  };
+
+  // Side panel: District-wide Overview
+  const renderTwinDistrictSummary = () => {
+    const projects = PP_DATA.projects;
+    const reports = PP_DATA.citizenReports;
+
+    const cWard = document.getElementById('twin-card-ward');
+    const cStatus = document.getElementById('twin-card-status');
+    const cTitle = document.getElementById('twin-card-title');
+    const cDesc = document.getElementById('twin-card-desc');
+    const cStats = document.getElementById('twin-card-stats');
+
+    if (cWard) cWard.textContent = 'METRO DISTRICT MODEL';
+    if (cStatus) {
+      cStatus.textContent = 'LIVE DIGITAL TWIN';
+      cStatus.className = 'text-[10px] px-2 py-0.5 rounded-full font-bold pill-on-track';
+    }
+    if (cTitle) cTitle.textContent = 'Metro Municipal District';
+    if (cDesc) cDesc.textContent = 'Interactive 3D municipal infrastructure twin mapping transit, viaducts, utilities, and citizen-reported urban hazards across Wards 1 through 9.';
+    if (cStats) {
+      cStats.innerHTML = `
+        <div class="bg-white/5 rounded-lg p-2">
+          <div class="font-bold text-base text-teal-300">${projects.length} Sites</div>
+          <div class="text-[10px] text-slate-400 uppercase tracking-wide">Capital Projects</div>
+        </div>
+        <div class="bg-white/5 rounded-lg p-2">
+          <div class="font-bold text-base text-amber-300">${reports.length} Reports</div>
+          <div class="text-[10px] text-slate-400 uppercase tracking-wide">Citizen Reports</div>
+        </div>
+      `;
+    }
+
+    const phaseEl = document.getElementById('twin-phase-list');
+    const pCount = document.getElementById('twin-phase-count');
+    if (pCount) pCount.textContent = 'Major Infrastructure';
+    if (phaseEl) {
+      phaseEl.innerHTML = projects.slice(0, 5).map(p => `
+        <div class="flex items-center justify-between p-2 rounded-lg bg-surface-container-low cursor-pointer hover:bg-surface-container transition-colors" onclick="PP.focusTwinProject('${p.id}')">
+          <div class="min-w-0 flex-1">
+            <div class="text-xs font-semibold text-on-surface truncate">${p.name}</div>
+            <div class="text-[10px] text-on-surface-variant">Ward ${p.ward} · ${p.contractor}</div>
+          </div>
+          ${statusPill(p.status)}
+        </div>
+      `).join('');
+    }
+
+    const sensorEl = document.getElementById('twin-sensors');
+    if (sensorEl) {
+      sensorEl.innerHTML = `
+        <div class="flex items-center justify-between p-2 rounded-lg bg-surface-container-low">
+          <span class="text-xs text-on-surface font-medium">District Sensor Grid</span>
+          <span class="label-caps text-secondary font-bold">142/142 Active</span>
+        </div>
+        <div class="flex items-center justify-between p-2 rounded-lg bg-surface-container-low">
+          <span class="text-xs text-on-surface font-medium">Network Latency</span>
+          <span class="label-caps text-secondary font-bold">14ms · High Speed</span>
+        </div>
+        <div class="flex items-center justify-between p-2 rounded-lg bg-surface-container-low">
+          <span class="text-xs text-on-surface font-medium">Telemetry Sync</span>
+          <span class="label-caps text-secondary font-bold">SQLite Real-time</span>
+        </div>
+      `;
+    }
+
+    const issueEl = document.getElementById('twin-issues');
+    const iCount = document.getElementById('twin-issues-count');
+    if (iCount) iCount.textContent = `${reports.length} Citizen Reports`;
+    if (issueEl) {
+      issueEl.innerHTML = reports.map(r => `
+        <div class="p-2 rounded-lg mb-1.5 bg-surface-container-low cursor-pointer hover:bg-surface-container transition-colors" onclick="PP.showTwinReportPopup(PP_DATA.citizenReports.find(x => x.id === '${r.id}'))">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-on-surface truncate">${r.title}</span>
+            <span class="label-caps ${r.priority === 'critical' ? 'text-error' : 'text-amber-600'} text-[9px] font-bold">${r.priority.toUpperCase()}</span>
+          </div>
+          <div class="text-[10px] text-on-surface-variant">${r.location}</div>
+        </div>
+      `).join('');
+    }
+  };
+
+  // Preset Views
+  const setTwinView = (mode) => {
+    twinState.viewMode = mode;
+    const btn3d = document.getElementById('btn-twin-3d');
+    const btnTop = document.getElementById('btn-twin-top');
+
+    if (mode === '3d') {
+      if (btn3d) { btn3d.className = 'px-2.5 py-1 text-xs font-semibold rounded bg-slate-900 text-white flex items-center gap-1'; }
+      if (btnTop) { btnTop.className = 'px-2.5 py-1 text-xs font-medium rounded bg-surface-container text-slate-700 hover:bg-slate-200 flex items-center gap-1'; }
+      const o = twinState.orbit;
+      o.targetTheta = Math.PI * 0.28;
+      o.targetPhi = Math.PI * 0.32;
+      o.targetRadius = 68;
+      o.panTarget.set(0, 0, 0);
+      toast('Switched to 3D Isometric View');
+    } else if (mode === 'top') {
+      if (btn3d) { btn3d.className = 'px-2.5 py-1 text-xs font-medium rounded bg-surface-container text-slate-700 hover:bg-slate-200 flex items-center gap-1'; }
+      if (btnTop) { btnTop.className = 'px-2.5 py-1 text-xs font-semibold rounded bg-slate-900 text-white flex items-center gap-1'; }
+      const o = twinState.orbit;
+      o.targetTheta = 0;
+      o.targetPhi = 0.05; // Almost straight down from above
+      o.targetRadius = 78;
+      o.panTarget.set(0, 0, 0);
+      toast('Switched to Top-Down Satellite View');
     }
   };
 
   const resetTwinCamera = () => {
-    if (state.twinCamera) {
-      state.twinCamera.position.set(10, 8, 12);
-      state.twinCamera.lookAt(0, 2, 0);
-      toast('Camera reset');
+    const o = twinState.orbit;
+    o.targetTheta = Math.PI * 0.28;
+    o.targetPhi = Math.PI * 0.32;
+    o.targetRadius = 68;
+    o.panTarget.set(0, 0, 0);
+    closeTwinPopup();
+    toast('Camera reset to District Overview');
+  };
+
+  const twinZoom = (direction) => {
+    const o = twinState.orbit;
+    const factor = direction > 0 ? 0.8 : 1.25;
+    o.targetRadius = Math.max(16, Math.min(105, o.targetRadius * factor));
+  };
+
+  const toggleTwinFullscreen = () => {
+    const wrapper = document.getElementById('twin-viewport-wrapper');
+    if (!wrapper) return;
+
+    if (!document.fullscreenElement) {
+      if (wrapper.requestFullscreen) {
+        wrapper.requestFullscreen();
+      } else if (wrapper.webkitRequestFullscreen) {
+        wrapper.webkitRequestFullscreen();
+      }
+      wrapper.classList.add('fullscreen');
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+      wrapper.classList.remove('fullscreen');
     }
+    setTimeout(handleTwinResize, 150);
   };
 
   // ===================== SPATIAL DASHBOARD =====================
@@ -2652,6 +3719,58 @@ INSTRUCTIONS:
     chat.scrollTop = chat.scrollHeight;
   };
 
+  const generateGeminiContent = async ({ prompt, systemInstruction, history, config = {} }) => {
+    const key = currentApiKey || GEMINI_API_KEY;
+
+    // 1. Try our backend proxy first (handles candidate model fallbacks and server .env key)
+    try {
+      const proxyRes = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: prompt || (history && history.length ? history[history.length - 1]?.parts?.[0]?.text : ''),
+          systemInstruction: systemInstruction || '',
+          apiKey: key || ''
+        })
+      });
+      if (proxyRes.ok) {
+        const proxyData = await proxyRes.json();
+        if (proxyData.success && proxyData.text) {
+          return { text: proxyData.text, model: proxyData.model };
+        }
+      }
+    } catch (e) {
+      console.warn('Backend AI proxy fallback to client direct call:', e);
+    }
+
+    // 2. Direct client-side call with fallback models: gemini-flash-lite-latest, gemini-3.8-flash, gemini-flash-latest
+    const candidateModels = ['gemini-flash-lite-latest', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    for (const model of candidateModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+        const payload = { generationConfig: config };
+        if (systemInstruction) payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+        if (history && history.length > 0) {
+          payload.contents = history;
+        } else if (prompt) {
+          payload.contents = [{ parts: [{ text: prompt }] }];
+        }
+
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) return { text, model };
+        }
+      } catch (err) {}
+    }
+    throw new Error('AI generation failed. Please check network connection.');
+  };
+
   const askAI = async () => {
     const input = document.getElementById('ai-input');
     const q = input?.value.trim();
@@ -2664,22 +3783,16 @@ INSTRUCTIONS:
     aiChatHistory.push({ role: 'user', parts: [{ text: q }] });
 
     try {
-      const key = currentApiKey || GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: buildGeminiSystemPrompt() }] },
-          contents: aiChatHistory,
-          generationConfig: { temperature: 0.4, maxOutputTokens: 512 }
-        })
+      const result = await generateGeminiContent({
+        prompt: q,
+        systemInstruction: buildGeminiSystemPrompt(),
+        history: aiChatHistory,
+        config: { temperature: 0.4, maxOutputTokens: 512 }
       });
-      const data = await res.json();
       document.getElementById('ai-loading-bubble')?.remove();
 
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        const reply = data.candidates[0].content.parts[0].text;
+      if (result && result.text) {
+        const reply = result.text;
         aiChatHistory.push({ role: 'model', parts: [{ text: reply }] });
         const formatted = reply
           .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -2687,8 +3800,6 @@ INSTRUCTIONS:
           .replace(/\*(.*?)\*/g, '<em>$1</em>')
           .replace(/\n/g, '<br>');
         appendAIMessage('bot', formatted);
-      } else if (data.error) {
-        appendAIMessage('bot', `<span class="text-red-500 font-medium">API Error: ${data.error.message}</span>`);
       } else {
         appendAIMessage('bot', '<span class="text-amber-600">No response received. Please try again.</span>');
       }
@@ -2705,7 +3816,7 @@ INSTRUCTIONS:
     const containerIds = ['monitoring-live-risk-container', `live-risk-result-${projectId}`];
     const btn = document.getElementById('btn-run-monitoring-risk') || document.getElementById(`btn-run-risk-${projectId}`);
 
-    const loadingHtml = `<div class="flex items-center gap-2 text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg p-3"><span class="inline-flex gap-1"><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce"></span><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce" style="animation-delay:.15s"></span><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce" style="animation-delay:.3s"></span></span>Running Gemini 3.5 deep analysis on ${p.name}…</div>`;
+    const loadingHtml = `<div class="flex items-center gap-2 text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg p-3"><span class="inline-flex gap-1"><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce"></span><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce" style="animation-delay:.15s"></span><span class="w-1.5 h-1.5 bg-teal-400 rounded-full animate-bounce" style="animation-delay:.3s"></span></span>Running Gemini AI deep analysis on ${p.name}…</div>`;
     containerIds.forEach(cid => { const el = document.getElementById(cid); if (el) el.innerHTML = loadingHtml; });
     if (btn) btn.disabled = true;
 
@@ -2731,36 +3842,26 @@ Provide a structured 3-section response:
 Keep total response under 160 words. End with disclaimer: "Analysis based on demo data only."`;
 
     try {
-      const key = currentApiKey || GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 400 }
-        })
+      const result = await generateGeminiContent({
+        prompt,
+        config: { temperature: 0.3, maxOutputTokens: 400 }
       });
-      const data = await res.json();
       if (btn) btn.disabled = false;
 
-      if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-        const reply = data.candidates[0].content.parts[0].text;
+      if (result && result.text) {
+        const reply = result.text;
         const formatted = reply
           .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
           .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
           .replace(/\*(.*?)\*/g, '<em>$1</em>')
           .replace(/\n/g, '<br>');
         const html = `<div class="text-xs text-on-surface leading-relaxed bg-gradient-to-br from-teal-50 to-blue-50 border border-teal-200/60 rounded-lg p-3.5">${formatted}</div>
-          <div class="flex items-center gap-1 mt-1.5 text-[10px] text-teal-600 font-medium"><span class="material-symbols-outlined text-[12px]">verified</span>Generated by Gemini 3.5 Flash · ${new Date().toLocaleTimeString()}</div>`;
+          <div class="flex items-center gap-1 mt-1.5 text-[10px] text-teal-600 font-medium"><span class="material-symbols-outlined text-[12px]">verified</span>Generated by Gemini AI (${result.model}) · ${new Date().toLocaleTimeString()}</div>`;
         containerIds.forEach(cid => { const el = document.getElementById(cid); if (el) el.innerHTML = html; });
-      } else {
-        const errHtml = `<div class="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2.5">API Error: ${data.error?.message || 'Unknown error. Please try again.'}</div>`;
-        containerIds.forEach(cid => { const el = document.getElementById(cid); if (el) el.innerHTML = errHtml; });
       }
     } catch (err) {
       if (btn) btn.disabled = false;
-      const errHtml = `<div class="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2.5">Network error. Ensure internet access is available and try again.</div>`;
+      const errHtml = `<div class="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2.5">AI analysis failed. Please verify internet connectivity.</div>`;
       containerIds.forEach(cid => { const el = document.getElementById(cid); if (el) el.innerHTML = errHtml; });
     }
   };
@@ -2792,18 +3893,11 @@ Respond ONLY in this exact JSON format with no markdown, no extra text:
 {"category":"road_damage|infrastructure_safety|water_supply|public_facility","priority":"low|medium|high|critical","department":"Department of Transportation|Public Works|Water & Utilities|Parks & Recreation|Electrical Services","summary":"One sentence summary","urgency_reason":"Why this priority level"}`;
 
     try {
-      const key = currentApiKey || GEMINI_API_KEY;
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 200 }
-        })
+      const result = await generateGeminiContent({
+        prompt,
+        config: { temperature: 0.1, maxOutputTokens: 200 }
       });
-      const data = await res.json();
-      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const rawText = result?.text || '';
       let parsed = null;
       try { parsed = JSON.parse(rawText.replace(/```json|```/g, '').trim()); } catch { parsed = null; }
 
@@ -2822,7 +3916,7 @@ Respond ONLY in this exact JSON format with no markdown, no extra text:
           </div>
           <div class="text-slate-700"><strong>Dept:</strong> ${parsed.department || '—'}</div>
           <div class="text-teal-700 mt-1 italic">${parsed.urgency_reason || ''}</div>
-          <div class="text-teal-500 mt-1.5 font-medium">Form auto-filled · Gemini 3.5 Flash</div>
+          <div class="text-teal-500 mt-1.5 font-medium">Form auto-filled · Gemini AI (${result.model})</div>
         </div>`;
       } else if (badge) {
         badge.innerHTML = `<div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-2">Could not auto-triage. Please fill the form manually.</div>`;
@@ -2897,7 +3991,15 @@ Respond ONLY in this exact JSON format with no markdown, no extra text:
       });
     }
 
-    navigate('dashboard');
+    // Navigate to default page based on role
+    const userRole = state.currentUser?.role || 'citizen';
+    const defaultPages = {
+      admin: 'dashboard',
+      field_inspector: 'dashboard',
+      contractor: 'dashboard',
+      citizen: 'dashboard',
+    };
+    navigate(defaultPages[userRole] || 'dashboard');
 
     // Global search
     document.getElementById('global-search')?.addEventListener('input', (e) => {
@@ -2952,7 +4054,8 @@ Respond ONLY in this exact JSON format with no markdown, no extra text:
     openProject,
     initMap, updateMapMarkers, flyToProject, centerMap, toggleMapLayer,
     loadMonitoringProject, openAddInspection,
-    initDigitalTwin, loadTwinProject, resetTwinCamera,
+    initDigitalTwin, loadTwinProject, resetTwinCamera, focusTwinProject,
+    setTwinView, twinZoom, toggleTwinFullscreen, closeTwinPopup, openCurrentTwinProject, showTwinReportPopup,
     initSpatialDashboard,
     switchReportTab, renderReports, openReport, submitReport, handlePhotoUpload, trackReport, updateReportStatus, saveReportRemark,
     renderUsersTable, openAddUser, editUser, deleteUser,

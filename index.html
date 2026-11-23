@@ -83,14 +83,15 @@ tailwind.config = {
 <style>
   * { box-sizing: border-box; }
   html, body {
-    overflow-x: hidden;
+    overflow: hidden;
     max-width: 100vw;
+    height: 100%;
   }
   body { 
     font-family: 'Inter', sans-serif;
     background: #f8f9ff;
     color: #0b1c30;
-    min-height: 100dvh;
+    height: 100dvh;
     overscroll-behavior-y: none;
     -webkit-tap-highlight-color: transparent;
   }
@@ -141,14 +142,24 @@ tailwind.config = {
   /* Main content area */
   .main-content {
     margin-left: 260px;
-    min-height: 100dvh;
+    height: 100dvh;
     max-width: calc(100vw - 260px);
-    overflow-x: hidden;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
     transition: margin-left 0.3s cubic-bezier(0.4,0,0.2,1), max-width 0.3s cubic-bezier(0.4,0,0.2,1);
   }
   .main-content.expanded {
     margin-left: 0;
     max-width: 100vw;
+  }
+  /* Scrollable page area below topbar */
+  .pages-scroll-area {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
   }
   @media (max-width: 768px) {
     .main-content {
@@ -254,9 +265,42 @@ tailwind.config = {
     z-index: 1 !important;
   }
 
-  /* 3D canvas */
-  #digital-twin-canvas { width: 100%; height: 400px; border-radius: 8px; cursor: grab; }
+  /* 3D canvas & Digital Twin Viewport */
+  .twin-viewport-wrapper {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0f172a;
+  }
+  #digital-twin-canvas {
+    width: 100%;
+    height: 520px;
+    display: block;
+    cursor: grab;
+    outline: none;
+  }
   #digital-twin-canvas:active { cursor: grabbing; }
+  .twin-viewport-wrapper:fullscreen {
+    padding: 0;
+    border-radius: 0;
+    width: 100vw !important;
+    height: 100vh !important;
+  }
+  .twin-viewport-wrapper:fullscreen #digital-twin-canvas {
+    height: 100vh !important;
+    width: 100vw !important;
+    border-radius: 0;
+  }
+  .twin-viewport-wrapper:fullscreen .twin-fullscreen-overlay {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    z-index: 20;
+  }
+  #twin-project-popup {
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
 
   /* Modal overlay */
   .modal-overlay {
@@ -496,6 +540,11 @@ tailwind.config = {
   #auth-screen.hidden {
     display: none !important;
   }
+
+  /* Role-based nav visibility */
+  .nav-role-group { display: none; }
+  .nav-role-group.role-visible { display: flex; }
+  div.nav-role-group.role-visible { display: block; }
 </style>
 </head>
 
@@ -591,34 +640,62 @@ tailwind.config = {
 
   <!-- Navigation -->
   <div class="flex-1 p-3 overflow-y-auto space-y-0.5">
-    <div class="label-caps text-slate-600 px-3 py-2 mt-1">Overview</div>
-    <a class="nav-item active" data-page="dashboard" onclick="PP.navigate('dashboard')">
+    <!-- OVERVIEW: Admin + Field Inspector -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-1 nav-role-group" data-roles="admin,field_inspector">Overview</div>
+    <a class="nav-item active nav-role-group" data-page="dashboard" data-roles="admin,field_inspector" onclick="PP.navigate('dashboard')">
       <span class="material-symbols-outlined">dashboard</span>
       Admin Dashboard
     </a>
-    <a class="nav-item" data-page="spatial" onclick="PP.navigate('spatial')">
+    <a class="nav-item nav-role-group" data-page="spatial" data-roles="admin,field_inspector" onclick="PP.navigate('spatial')">
       <span class="material-symbols-outlined">view_in_ar</span>
       Spatial Dashboard
     </a>
 
-    <div class="label-caps text-slate-600 px-3 py-2 mt-3">Projects</div>
-    <a class="nav-item" data-page="projects" onclick="PP.navigate('projects')">
+    <!-- OVERVIEW: Contractor -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-1 nav-role-group" data-roles="contractor">Overview</div>
+    <a class="nav-item nav-role-group" data-page="dashboard" data-roles="contractor" onclick="PP.navigate('dashboard')">
+      <span class="material-symbols-outlined">dashboard</span>
+      Dashboard
+    </a>
+
+    <!-- OVERVIEW: Citizen -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-1 nav-role-group" data-roles="citizen">Overview</div>
+    <a class="nav-item nav-role-group" data-page="dashboard" data-roles="citizen" onclick="PP.navigate('dashboard')">
+      <span class="material-symbols-outlined">dashboard</span>
+      My Dashboard
+    </a>
+
+    <!-- PROJECTS: Admin + Field Inspector + Contractor -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-3 nav-role-group" data-roles="admin,field_inspector,contractor">Projects</div>
+    <a class="nav-item nav-role-group" data-page="projects" data-roles="admin,field_inspector,contractor" onclick="PP.navigate('projects')">
       <span class="material-symbols-outlined">domain</span>
       All Projects
     </a>
-    <a class="nav-item" data-page="map" onclick="PP.navigate('map')">
+    <a class="nav-item nav-role-group" data-page="map" data-roles="admin,field_inspector,contractor" onclick="PP.navigate('map')">
       <span class="material-symbols-outlined">map</span>
       Project Map
     </a>
-    <a class="nav-item" data-page="monitoring" onclick="PP.navigate('monitoring')">
+    <a class="nav-item nav-role-group" data-page="monitoring" data-roles="admin,field_inspector,contractor" onclick="PP.navigate('monitoring')">
       <span class="material-symbols-outlined">monitoring</span>
       Progress Monitoring
     </a>
-    <a class="nav-item" data-page="digital-twin" onclick="PP.navigate('digital-twin')">
+    <a class="nav-item nav-role-group" data-page="digital-twin" data-roles="admin,field_inspector" onclick="PP.navigate('digital-twin')">
       <span class="material-symbols-outlined">view_in_ar</span>
       3D Digital Twin
     </a>
 
+    <!-- PROJECTS: Citizen -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-3 nav-role-group" data-roles="citizen">Explore</div>
+    <a class="nav-item nav-role-group" data-page="projects" data-roles="citizen" onclick="PP.navigate('projects')">
+      <span class="material-symbols-outlined">domain</span>
+      Public Projects
+    </a>
+    <a class="nav-item nav-role-group" data-page="map" data-roles="citizen" onclick="PP.navigate('map')">
+      <span class="material-symbols-outlined">map</span>
+      Project Map
+    </a>
+
+    <!-- INTELLIGENCE -->
     <div class="label-caps text-slate-600 px-3 py-2 mt-3">Intelligence</div>
     <a class="nav-item cursor-pointer" onclick="PP.showAIAssistant()">
       <span class="material-symbols-outlined text-teal-400">smart_toy</span>
@@ -626,15 +703,17 @@ tailwind.config = {
       <span class="ml-auto bg-teal-500/20 text-teal-300 border border-teal-500/30 text-[10px] font-bold rounded px-1.5 py-0.2">3.5 Flash</span>
     </a>
 
+    <!-- COMMUNITY -->
     <div class="label-caps text-slate-600 px-3 py-2 mt-3">Community</div>
     <a class="nav-item" data-page="reports" onclick="PP.navigate('reports')">
       <span class="material-symbols-outlined">flag</span>
       Citizen Reports
-      <span class="ml-auto bg-red-500 text-white text-[10px] font-bold rounded-full px-1.5 py-0.5">3</span>
+      <span class="ml-auto bg-red-500 text-white text-[10px] font-bold rounded-full px-1.5 py-0.5" id="sidebar-report-badge">3</span>
     </a>
 
-    <div class="label-caps text-slate-600 px-3 py-2 mt-3" id="admin-nav-label">Administration</div>
-    <div id="admin-nav-items">
+    <!-- ADMINISTRATION: Admin only -->
+    <div class="label-caps text-slate-600 px-3 py-2 mt-3 nav-role-group" data-roles="admin" id="admin-nav-label">Administration</div>
+    <div id="admin-nav-items" class="nav-role-group" data-roles="admin">
       <a class="nav-item" data-page="users" onclick="PP.navigate('users')">
         <span class="material-symbols-outlined">manage_accounts</span>
         User Management
@@ -698,7 +777,8 @@ tailwind.config = {
   </header>
 
   <!-- Pages Container -->
-  <div class="p-4 md:p-6">
+  <div class="pages-scroll-area" id="pages-scroll-area">
+  <div class="p-4 md:p-6 pb-24">
 
     <!-- ===================== DASHBOARD PAGE ===================== -->
     <div class="page active" id="page-dashboard">
@@ -1112,61 +1192,160 @@ tailwind.config = {
 
     <!-- ===================== 3D DIGITAL TWIN PAGE ===================== -->
     <div class="page" id="page-digital-twin">
-      <!-- Project selector -->
-      <div class="card p-3 mb-4 flex flex-wrap items-center gap-3">
+      <!-- Header Bar & Project Selector -->
+      <div class="card p-3 mb-4 flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
-          <span class="material-symbols-outlined text-on-surface-variant">view_in_ar</span>
-          <span class="font-semibold text-sm">3D Digital Twin:</span>
+          <div class="w-8 h-8 rounded-lg bg-teal-500/10 flex items-center justify-center text-teal-600">
+            <span class="material-symbols-outlined text-lg">view_in_ar</span>
+          </div>
+          <div>
+            <div class="font-jakarta font-bold text-sm text-on-surface">Municipal 3D Digital Twin</div>
+            <div class="text-[11px] text-on-surface-variant">Interactive 3D District Infrastructure · Live SQLite Database Sync</div>
+          </div>
         </div>
-        <div class="relative flex-1 min-w-48">
-          <select id="twin-project-select" onchange="PP.loadTwinProject(this.value)" class="w-full h-9 pl-3 pr-7 rounded-lg bg-surface-container border border-outline-variant text-sm cursor-pointer appearance-none">
-          </select>
-          <span class="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-sm pointer-events-none text-on-surface-variant">expand_more</span>
+        <div class="flex items-center gap-2 flex-wrap">
+          <div class="relative min-w-56">
+            <select id="twin-project-select" onchange="PP.loadTwinProject(this.value)" class="w-full h-9 pl-3 pr-8 rounded-lg bg-surface-container border border-outline-variant text-xs font-medium cursor-pointer appearance-none">
+              <option value="all">🌐 Metro District Overview (All Infrastructure)</option>
+            </select>
+            <span class="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-sm pointer-events-none text-on-surface-variant">expand_more</span>
+          </div>
+          <button onclick="PP.resetTwinCamera()" class="btn-secondary text-xs py-1.5 px-2.5" title="Reset Camera View">
+            <span class="material-symbols-outlined text-sm">restart_alt</span>
+            <span class="hidden sm:inline">Reset</span>
+          </button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <!-- 3D Viewport -->
-        <div class="lg:col-span-2">
+        <!-- 3D Viewport Column -->
+        <div class="lg:col-span-2 space-y-3">
           <div class="card p-3">
-            <div class="flex items-center justify-between mb-2">
-              <span class="section-title">Illustrative 3D Model</span>
-              <div class="flex items-center gap-2">
-                <span class="label-caps text-amber-600 bg-amber-50 px-2 py-0.5 rounded">SIMULATED — Not real sensors</span>
-                <button onclick="PP.resetTwinCamera()" class="btn-secondary text-xs py-1 px-2">
+            <!-- Toolbar & Legend -->
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-100">
+              <!-- View Controls -->
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <button onclick="PP.setTwinView('3d')" class="px-2.5 py-1 text-xs font-semibold rounded bg-slate-900 text-white hover:bg-slate-800 transition-colors flex items-center gap-1" id="btn-twin-3d">
+                  <span class="material-symbols-outlined text-sm">3d_rotation</span>3D View
+                </button>
+                <button onclick="PP.setTwinView('top')" class="px-2.5 py-1 text-xs font-medium rounded bg-surface-container hover:bg-slate-200 text-slate-700 transition-colors flex items-center gap-1" id="btn-twin-top">
+                  <span class="material-symbols-outlined text-sm">navigation</span>Top View
+                </button>
+                <div class="h-4 w-px bg-slate-200 mx-1"></div>
+                <button onclick="PP.twinZoom(1)" class="w-7 h-7 flex items-center justify-center rounded bg-surface-container hover:bg-slate-200 text-slate-700 text-xs font-bold" title="Zoom In">+</button>
+                <button onclick="PP.twinZoom(-1)" class="w-7 h-7 flex items-center justify-center rounded bg-surface-container hover:bg-slate-200 text-slate-700 text-xs font-bold" title="Zoom Out">−</button>
+                <button onclick="PP.resetTwinCamera()" class="w-7 h-7 flex items-center justify-center rounded bg-surface-container hover:bg-slate-200 text-slate-700" title="Reset View">
                   <span class="material-symbols-outlined text-sm">center_focus_strong</span>
                 </button>
+                <button onclick="PP.toggleTwinFullscreen()" class="w-7 h-7 flex items-center justify-center rounded bg-surface-container hover:bg-slate-200 text-slate-700" title="Full Screen">
+                  <span class="material-symbols-outlined text-sm">fullscreen</span>
+                </button>
+              </div>
+
+              <!-- Status Legend -->
+              <div class="flex items-center gap-3 text-[11px] font-medium text-slate-600 flex-wrap">
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-[#14b8a6]"></span> On Track</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-[#f59e0b]"></span> Under Review</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-[#ef4444]"></span> Critical</span>
+                <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-[#3b82f6]"></span> Citizen Issue</span>
               </div>
             </div>
-            <canvas id="digital-twin-canvas"></canvas>
-            <!-- Controls hint -->
-            <div class="flex items-center gap-4 mt-2 text-xs text-on-surface-variant">
-              <span class="flex items-center gap-1"><span class="material-symbols-outlined text-sm">mouse</span>Drag to rotate</span>
-              <span class="flex items-center gap-1"><span class="material-symbols-outlined text-sm">scroll</span>Scroll to zoom</span>
+
+            <!-- Viewport Relative Area -->
+            <div class="twin-viewport-wrapper" id="twin-viewport-wrapper">
+              <canvas id="digital-twin-canvas"></canvas>
+
+              <!-- Floating Interactive Project Popup Card -->
+              <div id="twin-project-popup" class="hidden absolute bottom-4 left-4 right-4 md:right-auto md:w-96 bg-slate-900/90 backdrop-blur-md border border-slate-700 text-white rounded-xl p-4 shadow-2xl z-10 animate-fadeIn">
+                <div class="flex items-start justify-between gap-2 mb-2">
+                  <div>
+                    <span id="twin-popup-badge" class="label-caps px-2 py-0.5 rounded text-[10px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/30">ON TRACK</span>
+                    <h3 id="twin-popup-title" class="font-jakarta font-bold text-sm text-white mt-1 leading-snug">Project Title</h3>
+                    <div id="twin-popup-meta" class="text-[11px] text-slate-400 mt-0.5">PP-2024-001 · Ward 4 · Skanska-Apex JV</div>
+                  </div>
+                  <button onclick="PP.closeTwinPopup()" class="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-colors">
+                    <span class="material-symbols-outlined text-sm">close</span>
+                  </button>
+                </div>
+                <p id="twin-popup-desc" class="text-xs text-slate-300 line-clamp-2 mb-2">Project description details.</p>
+                <div class="space-y-1.5 mb-3">
+                  <div class="flex justify-between text-[11px]">
+                    <span class="text-slate-400">Progress</span>
+                    <span id="twin-popup-pct" class="font-bold text-teal-400">68%</span>
+                  </div>
+                  <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                    <div id="twin-popup-bar" class="bg-teal-500 h-1.5 rounded-full" style="width: 68%"></div>
+                  </div>
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800">
+                  <div id="twin-popup-update" class="text-[10px] text-slate-400 truncate max-w-[200px]">Latest inspection: Pass</div>
+                  <button id="twin-popup-view-btn" onclick="PP.openCurrentTwinProject()" class="text-xs text-teal-300 hover:text-teal-200 font-semibold flex items-center gap-0.5">
+                    View Details <span class="material-symbols-outlined text-sm">arrow_forward</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Controls hint bar -->
+            <div class="flex flex-wrap items-center justify-between gap-3 mt-2 text-xs text-on-surface-variant px-1">
+              <div class="flex items-center gap-4 flex-wrap">
+                <span class="flex items-center gap-1"><span class="material-symbols-outlined text-sm text-slate-400">mouse</span><strong>Left Click:</strong> Rotate / Orbit</span>
+                <span class="flex items-center gap-1"><span class="material-symbols-outlined text-sm text-slate-400">pan_tool</span><strong>Right Click / Shift:</strong> Pan</span>
+                <span class="flex items-center gap-1"><span class="material-symbols-outlined text-sm text-slate-400">swipe_vertical</span><strong>Scroll:</strong> Zoom</span>
+              </div>
+              <span class="text-teal-600 font-medium flex items-center gap-1">
+                <span class="material-symbols-outlined text-sm">touch_app</span> Click any 3D structure or marker to inspect
+              </span>
             </div>
           </div>
         </div>
 
-        <!-- 3D Info Panel -->
+        <!-- 3D Info Panel Column -->
         <div class="space-y-3">
+          <!-- Active Project Card -->
+          <div class="card p-4 bg-gradient-to-br from-slate-900 to-slate-800 text-white rounded-xl shadow-md" id="twin-active-card">
+            <div class="flex items-center justify-between mb-2">
+              <span class="label-caps text-teal-400" id="twin-card-ward">METRO DISTRICT MODEL</span>
+              <span id="twin-card-status" class="pill-on-track text-[10px] px-2 py-0.5 rounded-full font-bold">ALL ACTIVE</span>
+            </div>
+            <h3 class="font-jakarta font-bold text-base text-white mb-1" id="twin-card-title">Metro Municipal District</h3>
+            <p class="text-xs text-slate-300 mb-3" id="twin-card-desc">Comprehensive real-time 3D spatial ledger showing active civil infrastructure, road repairs, transit viaducts, and municipal facilities.</p>
+            <div class="grid grid-cols-2 gap-2 text-center pt-2 border-t border-slate-700/60" id="twin-card-stats">
+              <div class="bg-white/5 rounded-lg p-2">
+                <div class="font-bold text-base text-teal-300" id="twin-stat-projects">8 Projects</div>
+                <div class="text-[10px] text-slate-400 uppercase tracking-wide">Infrastructure Sites</div>
+              </div>
+              <div class="bg-white/5 rounded-lg p-2">
+                <div class="font-bold text-base text-amber-300" id="twin-stat-reports">3 Reports</div>
+                <div class="text-[10px] text-slate-400 uppercase tracking-wide">Citizen Reports</div>
+              </div>
+            </div>
+          </div>
+
           <!-- Phase selector -->
           <div class="card p-3">
-            <div class="section-title mb-2">Construction Phase</div>
-            <div class="space-y-1" id="twin-phase-list"></div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-title text-sm">Construction Phases</span>
+              <span class="text-[11px] text-slate-500" id="twin-phase-count">Milestones</span>
+            </div>
+            <div class="space-y-1.5" id="twin-phase-list"></div>
           </div>
 
           <!-- Sensor indicators -->
           <div class="card p-3">
             <div class="flex items-center justify-between mb-2">
-              <span class="section-title">System Indicators</span>
-              <span class="label-caps text-amber-600">SIMULATED</span>
+              <span class="section-title text-sm">Infrastructure Telemetry</span>
+              <span class="label-caps text-teal-600 bg-teal-50 px-2 py-0.5 rounded text-[10px]">LIVE SIMULATION</span>
             </div>
             <div class="space-y-2" id="twin-sensors"></div>
           </div>
 
           <!-- Inspection markers -->
           <div class="card p-3">
-            <div class="section-title mb-2">Issue Markers</div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-title text-sm">Inspection & Hazard Log</span>
+              <span class="label-caps text-slate-500 text-[10px]" id="twin-issues-count">Audits</span>
+            </div>
             <div id="twin-issues"></div>
           </div>
         </div>
@@ -1387,6 +1566,7 @@ tailwind.config = {
     </div>
 
   </div><!-- /pages container -->
+  </div><!-- /pages-scroll-area -->
 </div><!-- /main-content -->
 
 <!-- Mobile Bottom Nav -->
@@ -1706,9 +1886,9 @@ tailwind.config = {
 </button>
 
 <!-- Data Layer -->
-<script src="data/projects.js?v=20261124"></script>
+<script src="data/projects.js?v=20261125"></script>
 
 <!-- App Script -->
-<script src="app.js?v=20261124"></script>
+<script src="app.js?v=20261125"></script>
 </body>
 </html>

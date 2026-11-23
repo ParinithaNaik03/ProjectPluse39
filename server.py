@@ -28,6 +28,7 @@ CORS(app, supports_credentials=True)
 PORT = int(os.getenv("PORT", 8000))
 SECRET_KEY = os.getenv("SECRET_KEY", "projectpulse_production_secret_key_2024")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TILE_PROVIDER = os.getenv("TILE_PROVIDER", "carto_voyager")
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'doc', 'docx'}
 
@@ -88,10 +89,51 @@ def serve_upload(filename):
 def get_config():
     return jsonify({
         "googleClientId": GOOGLE_CLIENT_ID,
+        "geminiApiKey": GEMINI_API_KEY,
         "tileProvider": TILE_PROVIDER,
         "appName": "ProjectPulse",
-        "hasGoogleAuth": bool(GOOGLE_CLIENT_ID and not GOOGLE_CLIENT_ID.startswith("YOUR_"))
+        "hasGoogleAuth": bool(GOOGLE_CLIENT_ID and not GOOGLE_CLIENT_ID.startswith("YOUR_")),
+        "hasGeminiKey": bool(GEMINI_API_KEY)
     })
+
+# ===================== AI ASSISTANT PROXY =====================
+
+@app.route("/api/ai/chat", methods=["POST"])
+def ai_chat_proxy():
+    data = request.get_json(silent=True) or {}
+    user_prompt = data.get("prompt", "")
+    system_instruction = data.get("systemInstruction", "")
+    client_key = data.get("apiKey") or GEMINI_API_KEY
+
+    if not client_key:
+        return jsonify({"error": "Gemini API key is not configured. Please supply an API key."}), 400
+
+    candidate_models = ["gemini-flash-lite-latest", "gemini-3.8-flash", "gemini-flash-latest"]
+    payload = {
+        "contents": [{"parts": [{"text": user_prompt}]}]
+    }
+    if system_instruction:
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+
+    last_error = "Unknown error"
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={client_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=20)
+            if resp.status_code == 200:
+                res_data = resp.json()
+                text = ""
+                candidates = res_data.get("candidates", [])
+                if candidates and "content" in candidates[0]:
+                    parts = candidates[0]["content"].get("parts", [])
+                    text = "".join(p.get("text", "") for p in parts)
+                return jsonify({"success": True, "text": text, "model": model})
+            else:
+                last_error = f"{resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            last_error = str(e)
+
+    return jsonify({"error": f"AI generation failed: {last_error}"}), 502
 
 # ===================== AUTHENTICATION =====================
 
